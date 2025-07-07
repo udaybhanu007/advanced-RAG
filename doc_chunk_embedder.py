@@ -182,8 +182,16 @@ def chunk_file_with_metadata(file_path, output_json_path, max_words=400, overlap
 
 if __name__ == "__main__":
     # Example: change file_path to any supported file (md, pdf, txt)
-    file_path = "mastering_ai_agents.md"
-    output_json_path = "doc_chunk_embeddings.json"
+    file_path = "AI_Security.pdf"
+    output_json_path = "doc_chunk_embeddings1.json"
+    # Save the markdown output from the PDF as a separate .md file
+    if file_path.lower().endswith('.pdf'):
+        from pdf_markdown_converter import pdf_to_md
+        md_file = file_path.rsplit('.', 1)[0] + ".md"
+        markdown_content = pdf_to_md(file_path)
+        with open(md_file, "w", encoding="utf-8") as f:
+            f.write(markdown_content)
+        print(f"[INFO] Markdown file saved as {md_file}")
     # Increase max_words to reduce chunk count for faster CPU embedding
     max_words = 1000
     overlap_words = 100
