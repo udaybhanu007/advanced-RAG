@@ -1,0 +1,9 @@
+langchain
+langchain-community
+langchain-openai
+qdrant-client
+pydantic
+sentence-transformers
+transformers
+pymupdf
+pymupdf4llm
