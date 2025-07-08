@@ -8,6 +8,7 @@ import os
 from pydantic import BaseModel, Field
 from typing import List, Optional
 import streamlit as st
+from sentence_transformers.cross_encoder import CrossEncoder
 
 class Source(BaseModel):
     """Represents a single source document."""
@@ -36,6 +37,7 @@ class RAGQueryEngine:
         self.vectorstore = None
         self.qa_chain = None
         self.content_payload_key = "content"
+        self.cross_encoder = CrossEncoder('cross-encoder/ms-marco-MiniLM-L6-v2')
         self._setup_retrieval_chain()
    
     def _setup_retrieval_chain(self):
@@ -83,11 +85,23 @@ class RAGQueryEngine:
             #source_docs =self.vectorstore.as_retriever(search_kwargs={"k": 5})
             source_docs = self.vectorstore.similarity_search(
                 query=question,
-                k=5
+                k=10
             )
-            if source_docs:
+
+            # Rerank the chunks
+            cross_inp = [[question, doc.page_content] for doc in source_docs]
+            cross_scores = self.cross_encoder.predict(cross_inp)
+            
+            # Combine docs with scores and sort
+            scored_docs = list(zip(cross_scores, source_docs))
+            scored_docs.sort(key=lambda x: x[0], reverse=True)
+
+            # Select top 5
+            top_docs = [doc for score, doc in scored_docs[:5]]
+
+            if top_docs:
                 # Patch: fetch full payload for each doc from Qdrant
-                for i, doc in enumerate(source_docs):
+                for i, doc in enumerate(top_docs):
                     point = self.qdrant_client.retrieve(
                         collection_name=self.collection_name,
                         ids=[doc.metadata.get("_id")]
@@ -97,7 +111,7 @@ class RAGQueryEngine:
                     print(f"Document {i+1} metadata: {doc.metadata}")
             
             # Filter out documents that are None or have empty content
-            valid_docs = [doc for doc in source_docs if doc.page_content and doc.page_content.strip()]
+            valid_docs = [doc for doc in top_docs if doc.page_content and doc.page_content.strip()]
             
             if not valid_docs:
                 # If no valid documents are found, return a specific response
@@ -191,7 +205,8 @@ def run_streamlit_app():
                 for i, source in enumerate(result['sources'], 1):
                     with st.expander(f"Source {i}: {source['metadata'].get('source', 'Unknown')}"):
                         st.write(f"**File Path:** {source['metadata'].get('file_path', 'N/A')}")
-                        st.write(f"**Content:** {source['content']}")                      
+                        st.write(f"**Content:** {source['content']}")
+                        
             else:
                 st.write("No sources found.")
         else:
