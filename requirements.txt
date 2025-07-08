@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 requests
 python-dotenv
 mammoth
@@ -11,3 +12,14 @@ qdrant-client
 beautifulsoup4
 azure-ai-contentsafety
 tiktoken
+=======
+langchain
+langchain-community
+langchain-openai
+qdrant-client
+pydantic
+sentence-transformers
+transformers
+pymupdf
+pymupdf4llm
+>>>>>>> b3c0c2bffd33a7d8234358ae71e34e3eccc04366
