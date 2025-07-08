@@ -1,1 +1,0 @@
-ALTER TABLE example_model ADD COLUMN salary DECIMAL(10,2) DEFAULT 0.0;
