@@ -1,0 +1,13 @@
+requests
+python-dotenv
+mammoth
+pandas
+openpyxl
+pymupdf
+pymupdf4llm
+sentence-transformers
+transformers
+qdrant-client
+beautifulsoup4
+azure-ai-contentsafety
+tiktoken
