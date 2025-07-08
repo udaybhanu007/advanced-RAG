@@ -4,8 +4,39 @@ import json
 import uuid
 import os
 import time
+
 from sentence_transformers import SentenceTransformer
 from transformers import AutoTokenizer
+def split_large_chunk(content, heading, max_words=400, overlap_words=100):
+    """Split a large content string into smaller chunks, all with the same heading."""
+    import re
+    def split_into_sentences(text):
+        return re.split(r'(?<=[.!?])\s+', text)
+    def sliding_window(sentences, max_words, overlap_words):
+        chunks, i, n = [], 0, len(sentences)
+        while i < n:
+            chunk, word_count, j = [], 0, i
+            while j < n and word_count < max_words:
+                words = sentences[j].split()
+                if word_count + len(words) > max_words and chunk:
+                    break
+                chunk.append(sentences[j])
+                word_count += len(words)
+                j += 1
+            if chunk:
+                chunks.append(' '.join(chunk))
+            if word_count == 0:
+                i += 1
+            else:
+                overlap = 0
+                k = j - 1
+                while k >= i and overlap < overlap_words:
+                    overlap += len(sentences[k].split())
+                    k -= 1
+                i = k + 1
+        return chunks
+    sentences = split_into_sentences(content)
+    return [{"heading": heading, "content": chunk_text} for chunk_text in sliding_window(sentences, max_words, overlap_words)]
 
 embedding_model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
 tokenizer = AutoTokenizer.from_pretrained("sentence-transformers/all-MiniLM-L6-v2")
@@ -108,23 +139,15 @@ def extract_headings_and_chunks_from_text(text, max_words=400, overlap_words=100
             unique_headings.append((idx, h))
             seen.add(h)
     chunks = []
-    # If no headings found, use sliding window chunking on the whole text
+    # If no headings found, use split_large_chunk on the whole text
     if not unique_headings:
-        sentences = split_into_sentences(text)
-        sw_chunks = sliding_window_chunk(sentences, max_words, overlap_words)
-        for chunk_text in sw_chunks:
-            chunks.append({"heading": "", "content": chunk_text})
-        return chunks
+        return split_large_chunk(text, "", max_words, overlap_words)
     # If preamble exists before first heading
     if unique_headings and unique_headings[0][0] > 0:
         preamble = "".join(lines[:unique_headings[0][0]]).strip()
         if preamble:
-            # Recursively chunk preamble if too large
             if len(preamble.split()) > max_words:
-                sentences = split_into_sentences(preamble)
-                sw_chunks = sliding_window_chunk(sentences, max_words, overlap_words)
-                for chunk_text in sw_chunks:
-                    chunks.append({"heading": "Preamble", "content": chunk_text})
+                chunks.extend(split_large_chunk(preamble, "Preamble", max_words, overlap_words))
             else:
                 chunks.append({"heading": "Preamble", "content": preamble})
     # For each heading section
@@ -134,12 +157,8 @@ def extract_headings_and_chunks_from_text(text, max_words=400, overlap_words=100
         content = "".join(content_lines).strip()
         if not content:
             continue
-        # Recursively chunk if too large
         if len(content.split()) > max_words:
-            sentences = split_into_sentences(content)
-            sw_chunks = sliding_window_chunk(sentences, max_words, overlap_words)
-            for chunk_text in sw_chunks:
-                chunks.append({"heading": heading, "content": chunk_text})
+            chunks.extend(split_large_chunk(content, heading, max_words, overlap_words))
         else:
             chunks.append({"heading": heading, "content": content})
     return chunks
@@ -182,8 +201,16 @@ def chunk_file_with_metadata(file_path, output_json_path, max_words=400, overlap
 
 if __name__ == "__main__":
     # Example: change file_path to any supported file (md, pdf, txt)
-    file_path = "mastering_ai_agents.md"
-    output_json_path = "doc_chunk_embeddings.json"
+    file_path = "AI_Security.pdf"
+    output_json_path = "doc_chunk_embeddings1.json"
+    # Save the markdown output from the PDF as a separate .md file
+    if file_path.lower().endswith('.pdf'):
+        from pdf_markdown_converter import pdf_to_md
+        md_file = file_path.rsplit('.', 1)[0] + ".md"
+        markdown_content = pdf_to_md(file_path)
+        with open(md_file, "w", encoding="utf-8") as f:
+            f.write(markdown_content)
+        print(f"[INFO] Markdown file saved as {md_file}")
     # Increase max_words to reduce chunk count for faster CPU embedding
     max_words = 1000
     overlap_words = 100
