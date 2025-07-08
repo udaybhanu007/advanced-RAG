@@ -7,6 +7,7 @@ from langchain_openai import AzureChatOpenAI
 import os
 from pydantic import BaseModel, Field
 from typing import List, Optional
+import streamlit as st
 
 class Source(BaseModel):
     """Represents a single source document."""
@@ -29,12 +30,12 @@ class RAGQueryEngine:
         self.collection_name = collection_name
         self.qdrant_client = QdrantClient(host=qdrant_host, port=qdrant_port)
         self.embeddings = HuggingFaceEmbeddings(
-            model_name="sentence-transformers/all-MiniLM-L6-v2"
+            model_name="sentence-transformers/all-MiniLM-L6-v2",
+            model_kwargs={'device': 'cpu'}
         )
         self.vectorstore = None
         self.qa_chain = None
         self.content_payload_key = "content"
-        self.metadata_payload_key = "metadata"
         self._setup_retrieval_chain()
    
     def _setup_retrieval_chain(self):
@@ -45,8 +46,7 @@ class RAGQueryEngine:
                 client=self.qdrant_client,
                 collection_name=self.collection_name,
                 embeddings=self.embeddings,
-                content_payload_key=self.content_payload_key,
-                metadata_payload_key=self.metadata_payload_key,
+                content_payload_key=self.content_payload_key
             )
            
             # Initialize LLM
@@ -80,11 +80,21 @@ class RAGQueryEngine:
        
         try:
             # Manually retrieve documents to filter them
-            retriever = self.vectorstore.as_retriever(
-                search_type="similarity",
-                search_kwargs={"k": 5}
+            #source_docs =self.vectorstore.as_retriever(search_kwargs={"k": 5})
+            source_docs = self.vectorstore.similarity_search(
+                query=question,
+                k=5
             )
-            source_docs = retriever.get_relevant_documents(question)
+            if source_docs:
+                # Patch: fetch full payload for each doc from Qdrant
+                for i, doc in enumerate(source_docs):
+                    point = self.qdrant_client.retrieve(
+                        collection_name=self.collection_name,
+                        ids=[doc.metadata.get("_id")]
+                    )
+                    if point and point[0].payload:
+                        doc.metadata = point[0].payload
+                    print(f"Document {i+1} metadata: {doc.metadata}")
             
             # Filter out documents that are None or have empty content
             valid_docs = [doc for doc in source_docs if doc.page_content and doc.page_content.strip()]
@@ -149,45 +159,43 @@ class RAGQueryEngine:
             return False
  
  
-def main():
-    """Example usage of the RAG Query Engine"""
-   
-    # Initialize the RAG query engine
-    rag_engine = RAGQueryEngine(collection_name="doc_chunk_embeddings")
-   
-    # Verify connection
-    if not rag_engine.verify_connection():
-        print("Failed to connect to Qdrant. Please check your setup.")
-        return
-   
-    # Example questions
-    questions = [
-        "What are RAG: Large Language Model Optimization?"             
-    ]
-   
-    print("\n" + "="*60)
-    print("RAG QUERY ENGINE - TESTING")
-    print("="*60)
-   
-    for question in questions:
-        print(f"\n🔍 Question: {question}")
-        print("-" * 50)
-       
-        # Query the system
-        result = rag_engine.query(question)
-       
-        print(f"💡 Answer: {result['answer']}")
-        print(f"📚 Sources used: {result['num_sources']}")
-       
-        if result['sources']:
-            print("\n📖 Source Details:")
-            for i, source in enumerate(result['sources'][:5], 1):  # Show first 2 sources
-                print(f"   {i}. Source: {source['source']}")
-                print(f"      Content: {source['content']}")
-       
-        print("\n" + "-"*50)
- 
+def run_streamlit_app():
+    """Streamlit interface for the RAG Query Engine"""
+    st.title("RAG Query Engine")
 
- 
+    # Initialize the RAG query engine
+    try:
+        rag_engine = RAGQueryEngine(collection_name="doc_chunk_embeddings")
+    except Exception as e:
+        st.error(f"Failed to initialize RAG engine: {e}")
+        return
+
+    # Verify connection to Qdrant
+    if not rag_engine.verify_connection():
+        st.error("Failed to connect to Qdrant. Please check your setup.")
+        return
+
+    # Get user input
+    question = st.text_input("Enter your question:")
+
+    if st.button("Get Answer"):
+        if question:
+            with st.spinner("Searching for answer..."):
+                result = rag_engine.query(question)
+            
+            st.subheader("Answer")
+            st.write(result['answer'])
+            
+            st.subheader(f"Sources ({result['num_sources']} found)")
+            if result['sources']:
+                for i, source in enumerate(result['sources'], 1):
+                    with st.expander(f"Source {i}: {source['metadata'].get('source', 'Unknown')}"):
+                        st.write(f"**File Path:** {source['metadata'].get('file_path', 'N/A')}")
+                        st.write(f"**Content:** {source['content']}")                      
+            else:
+                st.write("No sources found.")
+        else:
+            st.warning("Please enter a question.")
+
 if __name__ == "__main__":
-    main()
+    run_streamlit_app()
