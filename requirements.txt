@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 requests
 python-dotenv
 mammoth
