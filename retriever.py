@@ -1,4 +1,4 @@
-from langchain.chains.question_answering import load_qa_chain
+#from langchain.chains.question_answering import load_qa_chain
 from langchain_community.vectorstores import Qdrant
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.llms import Ollama  # or your preferred LLM
@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 from typing import List, Optional
 import streamlit as st
 from sentence_transformers.cross_encoder import CrossEncoder
+from langchain.chains import RetrievalQA
 
 class Source(BaseModel):
     """Represents a single source document."""
@@ -61,97 +62,94 @@ class RAGQueryEngine:
             )
 
             # Create a question-answering chain
-            self.qa_chain = load_qa_chain(
+            self.qa_chain = RetrievalQA.from_chain_type(
                 llm=llm,
                 chain_type="stuff",
+                retriever=self.vectorstore.as_retriever(search_kwargs={"k": 10}),
+                return_source_documents=True,
                 verbose=True
-                #return_source_documents=True
-
             )
-           
+
             print(f"✅ RetrievalQA chain setup successful with collection: {self.collection_name}")
            
         except Exception as e:
             print(f"❌ Error setting up RetrievalQA chain: {str(e)}")
             raise
    
-    def query(self, question: str) -> dict:
-        """Query the RAG system and return a structured response."""
+    def search(self, question: str) -> dict:
+        """
+        Query the RAG (Retrieval-Augmented Generation) system with a given question and return a structured response.
+        This method performs the following steps:
+        1. Invokes the QA chain to retrieve initial candidate documents relevant to the question.
+        2. Attempts to enrich each candidate document's metadata by fetching the full payload from Qdrant using the document's chunk ID.
+        3. Reranks the retrieved documents using a cross-encoder model to select the top 5 most relevant chunks.
+        4. Generates an answer using only the top 5 re-ranked chunks via the QA chain's document combination mechanism.
+        5. Constructs and returns a structured response containing the question, generated answer, source documents, and the number of sources.
+        Args:
+            question (str): The input question to query the RAG system.
+        Returns:
+            dict: A structured response containing the question, generated answer, list of source documents (with content and metadata), and the number of sources.
+        Raises:
+            ValueError: If the QA chain is not initialized.
+            Returns an error response in case of any other exceptions during processing.
+        """
+        """Query the RAG system and return a structured response using re-ranked top 5 results for answer generation."""
         if not self.qa_chain:
             raise ValueError("QA chain not initialized")
-       
+
         try:
-            # Manually retrieve documents to filter them
-            #source_docs =self.vectorstore.as_retriever(search_kwargs={"k": 5})
-            source_docs = self.vectorstore.similarity_search(
-                query=question,
-                k=10
-            )
+            # Run the QA chain to retrieve initial candidates
+            response = self.qa_chain.invoke({"query": question})
+            source_chunks = response["source_documents"]
 
-            # Rerank the chunks
-            cross_inp = [[question, doc.page_content] for doc in source_docs]
+            # Fetch full payload from Qdrant for each doc if possible
+            for doc in source_chunks:
+                # Try to get the chunk_id or _id
+                chunk_id = doc.metadata.get('chunk_id') or doc.metadata.get('_id')
+                if chunk_id:
+                    try:
+                        points = self.qdrant_client.retrieve(
+                            collection_name=self.collection_name,
+                            ids=[chunk_id]
+                        )
+                        if points and hasattr(points[0], 'payload') and isinstance(points[0].payload, dict):                          
+                            doc.metadata.update(points[0].payload)
+                    except Exception as e:
+                        print(f"Warning: Could not fetch payload for chunk_id {chunk_id}: {e}")
+
+            # Rerank the chunks using cross-encoder
+            cross_inp = [[question, doc.page_content] for doc in source_chunks]
             cross_scores = self.cross_encoder.predict(cross_inp)
-            
-            # Combine docs with scores and sort
-            scored_docs = list(zip(cross_scores, source_docs))
-            scored_docs.sort(key=lambda x: x[0], reverse=True)
+            scored_chunks = list(zip(cross_scores, source_chunks))
+            scored_chunks.sort(key=lambda x: x[0], reverse=True)
+            top_sortedchunks = [doc for score, doc in scored_chunks[:5]]
 
-            # Select top 5
-            top_docs = [doc for score, doc in scored_docs[:5]]
+            # Generate the answer using only the top 5 re-ranked chunks
+            # Use the combine_documents_chain of the RetrievalQA chain
+            answer = self.qa_chain.combine_documents_chain.run({
+                "input_documents": top_sortedchunks,
+                "question": question
+            })           
 
-            if top_docs:
-                # Patch: fetch full payload for each doc from Qdrant
-                for i, doc in enumerate(top_docs):
-                    point = self.qdrant_client.retrieve(
-                        collection_name=self.collection_name,
-                        ids=[doc.metadata.get("_id")]
-                    )
-                    if point and point[0].payload:
-                        doc.metadata = point[0].payload
-                    print(f"Document {i+1} metadata: {doc.metadata}")
-            
-            # Filter out documents that are None or have empty content
-            valid_docs = [doc for doc in top_docs if doc.page_content and doc.page_content.strip()]
-            
-            if not valid_docs:
-                # If no valid documents are found, return a specific response
-                rag_response = RAGResponse(
-                    question=question,
-                    answer="No relevant information found with content to answer the question.",
-                    sources=[],
-                    num_sources=0
-                )
-                return rag_response.model_dump()
-
-            # Run the QA chain with the filtered documents
-            response = self.qa_chain.invoke(
-                {"input_documents": valid_docs, "question": question},
-                return_only_outputs=True
-            )
-            answer = response["output_text"]
-           
-            # Create a list of Source objects from the valid documents
+            # Construct the sources list
             sources = [
                 Source(
                     content=doc.page_content,
-                    metadata=doc.metadata,
-                    source=doc.metadata.get("source", "Unknown")
-                ) for doc in valid_docs
+                    metadata=dict(doc.metadata) if doc.metadata else {},
+                    source=(doc.metadata.get("source") if doc.metadata and "source" in doc.metadata else "Unknown")
+                ) for doc in top_sortedchunks
             ]
-           
-            # Create and validate the RAGResponse
+        
             rag_response = RAGResponse(
                 question=question,
                 answer=answer,
                 sources=sources,
                 num_sources=len(sources)
             )
-           
             return rag_response.model_dump()
-           
+
         except Exception as e:
             print(f"❌ Error during query: {str(e)}")
-            # Return a structured error response
             error_response = RAGResponse(
                 question=question,
                 answer=f"Error processing query: {str(e)}",
@@ -195,7 +193,7 @@ def run_streamlit_app():
     if st.button("Get Answer"):
         if question:
             with st.spinner("Searching for answer..."):
-                result = rag_engine.query(question)
+                result = rag_engine.search(question)
             
             st.subheader("Answer")
             st.write(result['answer'])
@@ -214,3 +212,4 @@ def run_streamlit_app():
 
 if __name__ == "__main__":
     run_streamlit_app()
+   
