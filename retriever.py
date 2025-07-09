@@ -1,15 +1,15 @@
-#from langchain.chains.question_answering import load_qa_chain
+import os
+from typing import List, Optional
+from pydantic import BaseModel, Field
+import streamlit as st
+from qdrant_client import QdrantClient
 from langchain_community.vectorstores import Qdrant
 from langchain_community.embeddings import HuggingFaceEmbeddings
-from langchain_community.llms import Ollama  # or your preferred LLM
-from qdrant_client import QdrantClient
 from langchain_openai import AzureChatOpenAI
-import os
-from pydantic import BaseModel, Field
-from typing import List, Optional
-import streamlit as st
-from sentence_transformers.cross_encoder import CrossEncoder
 from langchain.chains import RetrievalQA
+from langchain_core.documents import Document
+from langchain.retrievers import BM25Retriever, EnsembleRetriever
+from sentence_transformers.cross_encoder import CrossEncoder
 
 class Source(BaseModel):
     """Represents a single source document."""
@@ -42,7 +42,16 @@ class RAGQueryEngine:
         self._setup_retrieval_chain()
    
     def _setup_retrieval_chain(self):
-        """Setup the RetrievalQA chain with Qdrant"""
+        """
+        Sets up the RetrievalQA chain using a hybrid retrieval approach that combines Qdrant vector search and BM25 keyword search.
+        This method performs the following steps:
+        1. Initializes a Qdrant vector store with the specified collection and embedding model.
+        2. Fetches all documents from the Qdrant collection to build a BM25Retriever for keyword-based retrieval.
+        3. Creates a vector retriever from the Qdrant vector store.
+        4. Combines the vector retriever and BM25 retriever using an EnsembleRetriever for hybrid search, or uses only the vector retriever if BM25 is unavailable.
+        5. Initializes an AzureChatOpenAI LLM with environment variables for deployment and API configuration.
+        6. Constructs a RetrievalQA chain that uses the hybrid retriever and the LLM for question answering, returning both answers and source documents.
+        """
         try:
             # Initialize Qdrant vector store with custom payload keys
             self.vectorstore = Qdrant(
@@ -51,7 +60,34 @@ class RAGQueryEngine:
                 embeddings=self.embeddings,
                 content_payload_key=self.content_payload_key
             )
-           
+
+            # Fetch all documents for BM25Retriever
+            all_docs = []
+            try:
+                points, _ = self.qdrant_client.scroll(collection_name=self.collection_name, limit=10000)
+                for pt in points:
+                    content = pt.payload.get(self.content_payload_key, "")
+                    meta = pt.payload.copy()
+                    
+                    all_docs.append(Document(page_content=content, metadata=meta))
+            except Exception as e:
+                print(f"Warning: Could not fetch all docs for BM25: {e}")
+
+            # Create BM25Retriever
+            bm25_retriever = None
+            if all_docs:
+                bm25_retriever = BM25Retriever.from_documents(all_docs, k=10)             
+
+            # Create vector retriever
+            vector_retriever = self.vectorstore.as_retriever(search_kwargs={"k": 10})
+
+            # Create EnsembleRetriever for hybrid search
+            
+            hybrid_retriever = EnsembleRetriever(
+                retrievers=[vector_retriever, bm25_retriever],
+                weights=[0.5, 0.5]
+            ) if bm25_retriever else vector_retriever
+
             # Initialize LLM
             llm = AzureChatOpenAI(
                 deployment_name=os.environ["deployment_name"],
@@ -65,13 +101,13 @@ class RAGQueryEngine:
             self.qa_chain = RetrievalQA.from_chain_type(
                 llm=llm,
                 chain_type="stuff",
-                retriever=self.vectorstore.as_retriever(search_kwargs={"k": 10}),
+                retriever=hybrid_retriever,
                 return_source_documents=True,
                 verbose=True
             )
 
-            print(f"✅ RetrievalQA chain setup successful with collection: {self.collection_name}")
-           
+            print(f"✅ RetrievalQA hybrid chain setup successful with collection: {self.collection_name}")
+
         except Exception as e:
             print(f"❌ Error setting up RetrievalQA chain: {str(e)}")
             raise
@@ -85,15 +121,7 @@ class RAGQueryEngine:
         3. Reranks the retrieved documents using a cross-encoder model to select the top 5 most relevant chunks.
         4. Generates an answer using only the top 5 re-ranked chunks via the QA chain's document combination mechanism.
         5. Constructs and returns a structured response containing the question, generated answer, source documents, and the number of sources.
-        Args:
-            question (str): The input question to query the RAG system.
-        Returns:
-            dict: A structured response containing the question, generated answer, list of source documents (with content and metadata), and the number of sources.
-        Raises:
-            ValueError: If the QA chain is not initialized.
-            Returns an error response in case of any other exceptions during processing.
         """
-        """Query the RAG system and return a structured response using re-ranked top 5 results for answer generation."""
         if not self.qa_chain:
             raise ValueError("QA chain not initialized")
 
@@ -101,6 +129,8 @@ class RAGQueryEngine:
             # Run the QA chain to retrieve initial candidates
             response = self.qa_chain.invoke({"query": question})
             source_chunks = response["source_documents"]
+
+            
 
             # Fetch full payload from Qdrant for each doc if possible
             for doc in source_chunks:
