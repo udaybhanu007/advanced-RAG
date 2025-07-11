@@ -1,5 +1,4 @@
 import os
-import argparse
 import time
 import re
 import uuid
@@ -21,21 +20,24 @@ import tiktoken
 # Load environment variables from a .env file for secure credential management
 load_dotenv()
 
-def get_args():
+def find_source_files(source_dir="source_documents"):
     """
-    Parses and returns command-line arguments.
-    This allows for dynamic configuration of the pipeline from the command line.
+    Finds all supported documents in the specified source directory.
+    Supported extensions are .pdf, .docx, .xlsx, .md, and .txt.
     """
-    parser = argparse.ArgumentParser(description="Build a RAG pipeline from source files to a vector store.")
-    # The primary input can be a local file path or a URL
-    parser.add_argument("input_path", type=str, help="Path to the input file or directory.")
-    # The name of the collection in the Qdrant vector store
-    parser.add_argument("--collection_name", type=str, default="rag_collection", help="Name of the Qdrant collection.")
-    # The maximum size of each text chunk in tokens
-    parser.add_argument("--chunk_size", type=int, default=400, help="Maximum number of tokens per chunk.")
-    # The number of tokens to overlap between adjacent chunks to maintain context
-    parser.add_argument("--chunk_overlap", type=int, default=80, help="Number of tokens to overlap between chunks.")
-    return parser.parse_args()
+    supported_extensions = ['.pdf', '.docx', '.xlsx', '.md', '.txt']
+    source_files = []
+    
+    if not os.path.isdir(source_dir):
+        print(f"Warning: Source directory '{source_dir}' not found. Please create it and add your documents.")
+        return []
+        
+    for root, _, files in os.walk(source_dir):
+        for file in files:
+            if any(file.endswith(ext) for ext in supported_extensions):
+                source_files.append(os.path.join(root, file))
+                
+    return source_files
 
 def clean_and_normalize(text):
     """
@@ -314,79 +316,51 @@ def embed_and_store(chunks, collection_name):
 
 def main():
     """The main function that orchestrates the entire RAG ingestion pipeline."""
-    # A mapping from URL content types to file extensions for cleaner logic.
-    CONTENT_TYPE_MAP = {
-        'application/pdf': '.pdf',
-        'application/vnd.openxmlformats-officedocument.wordprocessingml.document': '.docx',
-        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': '.xlsx',
-        'text/plain': '.txt',
-        'text/markdown': '.md'
-    }
-
-    # Parse command-line arguments
-    args = get_args()
     start_time = time.time()
     
-    input_path = args.input_path
-    temp_file_path = None
+    # Find all source documents automatically from the 'source_documents' directory
+    source_files = find_source_files()
+    
+    if not source_files:
+        print("No source files found in 'source_documents' directory. Exiting pipeline.")
+        return
 
-    try:
-        # If the input path is a URL, download the file to a temporary location.
-        if input_path.startswith(('http://', 'https://')):
-            print(f"URL detected. Downloading file from {input_path}...")
-            response = requests.get(input_path, stream=True)
-            response.raise_for_status()  # Raise an exception for bad status codes
+    print(f"Found {len(source_files)} source file(s) to process.")
+
+    all_safe_chunks = []
+    # Loop through each discovered file and process it
+    for file_path in source_files:
+        try:
+            print(f"\n--- Processing File: {file_path} ---")
             
-            # Infer the file extension from the 'Content-Type' header using the map.
-            content_type = response.headers.get('content-type', '')
-            file_extension = ".tmp"  # Default extension
-            for c_type, ext in CONTENT_TYPE_MAP.items():
-                if c_type in content_type:
-                    file_extension = ext
-                    break
+            # Step 1: Convert the source file (any format) into clean Markdown text.
+            markdown_text = convert_files_to_markdown(file_path)
 
-            # Stream the downloaded content into a temporary file.
-            with tempfile.NamedTemporaryFile(delete=False, suffix=file_extension) as temp_file:
-                temp_file_path = temp_file.name
-                for http_chunk in response.iter_content(chunk_size=8192):
-                    temp_file.write(http_chunk)
+            # Step 2: Normalize the text by cleaning HTML, linearizing tables, etc.
+            cleaned_text = clean_and_normalize(markdown_text)
+
+            # Step 3: Chunk the normalized text into smaller, semantically coherent pieces.
+            # Using default chunk_size=400 and chunk_overlap=80
+            chunks = chunk_text(cleaned_text, file_path, chunk_size=400, chunk_overlap=80)
+
+            # Step 4: Check each chunk for harmful content.
+            safe_chunks = check_content_safety(chunks)
             
-            print(f"File downloaded to temporary path: {temp_file_path}")
-            processing_path = temp_file_path
-        else:
-            # If it's a local path, use it directly.
-            processing_path = input_path
+            all_safe_chunks.extend(safe_chunks)
 
-        print("--- Starting RAG Pipeline ---")
+        except Exception as e:
+            print(f"Error processing file {file_path}: {e}")
+            continue # Move to the next file
 
-        # Step 1: Convert the source file (any format) into clean Markdown text.
-        markdown_text = convert_files_to_markdown(processing_path)
+    # Step 5: Embed and store ALL chunks from ALL files in a single batch
+    if all_safe_chunks:
+        # Using default collection_name="rag_collection"
+        embed_and_store(all_safe_chunks, collection_name="rag_collection")
+    else:
+        print("No safe chunks to process. Halting pipeline.")
 
-        # Step 2: Normalize the text by cleaning HTML, linearizing tables, etc.
-        cleaned_text = clean_and_normalize(markdown_text)
-
-        # Step 3: Chunk the normalized text into smaller, semantically coherent pieces.
-        chunks = chunk_text(cleaned_text, processing_path, args.chunk_size, args.chunk_overlap)
-
-        # Step 4: Check each chunk for harmful content.
-        safe_chunks = check_content_safety(chunks)
-
-        # Step 5: Generate embeddings and store the safe chunks in the vector store.
-        if safe_chunks:
-            embed_and_store(safe_chunks, args.collection_name)
-        else:
-            print("No safe chunks to process. Halting pipeline.")
-
-        end_time = time.time()
-        print(f"--- RAG Pipeline Finished in {end_time - start_time:.2f} seconds ---")
-
-    except requests.exceptions.RequestException as e:
-        print(f"Error downloading file from URL: {e}")
-    finally:
-        # Ensure the temporary file is deleted after processing.
-        if temp_file_path and os.path.exists(temp_file_path):
-            os.remove(temp_file_path)
-            print(f"Cleaned up temporary file: {temp_file_path}")
+    end_time = time.time()
+    print(f"\n--- RAG Pipeline Finished in {end_time - start_time:.2f} seconds ---")
 
 # Standard Python entry point
 if __name__ == "__main__":

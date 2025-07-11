@@ -47,6 +47,28 @@ def extract_text_from_image(file: str) -> str:
         print(f"Warning: Could not perform OCR on image {file}: {str(e)}")
         return f"[Image: {Path(file).name} - OCR not available]"
 
+def is_table_of_contents_page(page: pymupdf.Page, toc_line_threshold: int = 5) -> bool:
+    """
+    Heuristically checks if a page is a Table of Contents using multiple signals.
+    """
+    # Signal 1: Check for a title like "Contents" or "Table of Contents"
+    # We check the first few blocks of text on the page for a common ToC heading.
+    # Slicing the list of blocks is a version-compatible way to get the top 10.
+    top_blocks = page.get_text("blocks")[:10]
+    for block in top_blocks:
+        block_text = block[4].lower().strip()
+        if "contents" in block_text or "table of contents" in block_text:
+            return True
+
+    # Signal 2: Check for a high density of lines ending in page numbers.
+    # This is a strong indicator of a ToC.
+    toc_pattern = re.compile(r'.*[\s.]{3,}\s*\d+\s*$')
+    lines = page.get_text("text").split('\n')
+    toc_line_count = sum(1 for line in lines if toc_pattern.match(line.strip()))
+    
+    # If either signal is present, we classify it as a ToC page.
+    return toc_line_count > toc_line_threshold
+
 def replace_image_tags(md: str, image_folder: str) -> str:
     '''
     Looks for all image tags that contain the filename of the image extracted from that part of the markdown output
@@ -60,34 +82,32 @@ def replace_image_tags(md: str, image_folder: str) -> str:
 
 def pdf_to_md(file: str) -> str:
     '''
-    Gets the markdown output from the PDF, ignoring headers and footers.
-    This is done by creating a temporary, cropped PDF file on disk, which is then
-    processed by the markdown converter.
+    Gets the markdown output from the PDF, ignoring headers, footers, and ToC pages.
+    This is done by creating a temporary, cropped PDF file on disk.
     '''
     temp_pdf_path = None  # Initialize path to None
     try:
         original_doc = pymupdf.open(file)
         
-        # Generate a unique path for the temporary cropped PDF.
-        # We create the file handle just to get the name, then close it immediately
-        # to avoid file locking issues on Windows.
         temp_file_handle = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False)
         temp_pdf_path = temp_file_handle.name
         temp_file_handle.close()
 
-        # Create a new PDF document to save the cropped content.
         cropped_doc = pymupdf.open()
         for page in original_doc:
+            # Heuristically check if the page is a Table of Contents and skip it if so.
+            if is_table_of_contents_page(page):
+                print(f"Skipping Page {page.number + 1} as it appears to be a Table of Contents.")
+                continue
+
             content_area = pymupdf.Rect(page.rect.x0, page.rect.y0 * 1.1, page.rect.x1, page.rect.y1 * 0.9)
             new_page = cropped_doc.new_page(width=page.rect.width, height=page.rect.height)
             new_page.show_pdf_page(new_page.rect, original_doc, page.number, clip=content_area)
         
-        # Save the cropped document to the now-closed temporary file path.
         cropped_doc.save(temp_pdf_path)
         cropped_doc.close()
         original_doc.close()
 
-        # Process the temporary, cropped PDF file.
         with tempfile.TemporaryDirectory() as image_folder:
             md = pymupdf4llm.to_markdown(
                 doc=temp_pdf_path, 
