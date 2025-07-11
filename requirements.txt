@@ -21,4 +21,6 @@ transformers
 pymupdf
 pymupdf4llm
 streamlit
-
+opencensus-ext-azure
+opencensus
+azure-monitor-opentelemetry

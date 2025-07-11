@@ -1,5 +1,7 @@
 import os
 import logging
+import time
+from azure.monitor.opentelemetry import configure_azure_monitor
 import streamlit as st
 from typing import List, Optional
 from pydantic import BaseModel, Field
@@ -11,6 +13,12 @@ from langchain.chains import RetrievalQA
 from langchain_core.documents import Document
 from langchain.retrievers import BM25Retriever, EnsembleRetriever
 from sentence_transformers.cross_encoder import CrossEncoder
+from opencensus.stats import stats as stats_module
+from opencensus.stats import measure as measure_module
+from opencensus.stats import view as view_module
+from opencensus.stats import aggregation as aggregation_module
+from opencensus.tags import tag_map as tag_map_module
+from opencensus.ext.azure.metrics_exporter import new_metrics_exporter
 from opencensus.ext.azure.log_exporter import AzureLogHandler
 
 class Source(BaseModel):
@@ -42,20 +50,58 @@ class RAGQueryEngine:
         self.content_payload_key = "content"
         self.cross_encoder = CrossEncoder('cross-encoder/ms-marco-MiniLM-L6-v2')
         # Setup logging
-        self.logger = logging.getLogger("RAGQueryEngine")
+        self.logger = logging.getLogger("RAGMetricsLogger")
         self.logger.setLevel(logging.INFO)
-        # Add AzureLogHandler with InstrumentationKey from env, else StreamHandler
         azure_key = os.environ.get("AZURE_LOG_INSTRUMENTATION_KEY")
-        try:
-            if azure_key:
-                self.logger.addHandler(AzureLogHandler(connection_string=f"{azure_key}"))
-            else:
-                self.logger.addHandler(logging.StreamHandler())
-        except Exception as e:
-            if not self.logger.handlers:
-                self.logger.addHandler(logging.StreamHandler() + e)
+        self.metrics_enabled = False
+        if azure_key:
+            try:
+                self.logger.addHandler(AzureLogHandler(connection_string=azure_key))
+                self.stats = stats_module.stats
+                self.view_manager = self.stats.view_manager
+                self.stats_recorder = self.stats.stats_recorder
+                self.exporter = new_metrics_exporter(connection_string=f"{azure_key}")
+                self.view_manager.register_exporter(self.exporter)
+                self._register_metrics()                
+                self.metrics_enabled = True
+            except Exception as e:
+                self.logger.warning(f"Azure metrics setup failed: {e}")
+                self.metrics_enabled = False
+                self.stats = None
+                self.view_manager = None
+                self.stats_recorder = None
+                self.exporter = None
+        else:
+            self.logger.addHandler(logging.StreamHandler())
+            self.stats = None
+            self.view_manager = None
+            self.stats_recorder = None
+            self.exporter = None
         self._setup_retrieval_chain()
    
+    
+    def _register_metrics(self):
+        # Define measures
+        self.retrieval_latency = measure_module.MeasureFloat("retrieval_latency", "Time to fetch chunks", "ms")
+        self.chunks_retrieved = measure_module.MeasureInt("chunks_retrieved", "Chunks retrieved per query", "count")
+        self.rerank_latency = measure_module.MeasureFloat("rerank_latency", "Re-ranking latency", "ms")
+        self.llm_latency = measure_module.MeasureFloat("llm_latency", "LLM response latency", "ms")
+        self.token_usage = measure_module.MeasureInt("token_usage", "Token usage per query", "tokens")
+        self.response_length = measure_module.MeasureInt("response_length", "Response length", "tokens")
+
+        # Register views
+        views = [
+            view_module.View("retrieval_latency_view", "Retrieval latency", [], self.retrieval_latency, aggregation_module.LastValueAggregation()),
+            view_module.View("chunks_retrieved_view", "Chunks retrieved", [], self.chunks_retrieved, aggregation_module.SumAggregation()),
+            view_module.View("rerank_latency_view", "Re-ranking latency", [], self.rerank_latency, aggregation_module.LastValueAggregation()),
+            view_module.View("llm_latency_view", "LLM latency", [], self.llm_latency, aggregation_module.LastValueAggregation()),
+            view_module.View("token_usage_view", "Token usage", [], self.token_usage, aggregation_module.SumAggregation()),
+            view_module.View("response_length_view", "Response length", [], self.response_length, aggregation_module.LastValueAggregation()),
+        ]
+        if self.view_manager is not None:
+            for v in views:
+                self.view_manager.register_view(v)
+
     def _setup_retrieval_chain(self):
         """
         Sets up the RetrievalQA chain using a hybrid retrieval approach that combines Qdrant vector search and BM25 keyword search.
@@ -127,7 +173,8 @@ class RAGQueryEngine:
         except Exception as e:
             self.logger.error(f"Error setting up RetrievalQA chain: {str(e)}")
             raise
-    def search(self, question: str) -> dict:    
+    
+    def search(self, question: str) -> dict:
         """
         Query the RAG (Retrieval-Augmented Generation) system with a given question and return a structured response.
         This method performs the following steps:
@@ -141,21 +188,26 @@ class RAGQueryEngine:
             raise ValueError("QA chain not initialized")
 
         try:
+            tag_map = tag_map_module.TagMap()
+            self.metrics_enabled = True
             self.logger.info(f"Received query: {question}")
+            # Record retrieval latency
+            start_retrieval = time.time()         
             response = self.qa_chain.invoke({"query": question})
+            retrieval_time = (time.time() - start_retrieval) * 1000
+            if self.metrics_enabled and self.stats_recorder and self.retrieval_latency:
+                mmap = self.stats_recorder.new_measurement_map()
+                if mmap:
+                    mmap.measure_float_put(self.retrieval_latency, retrieval_time)
+                    mmap.record(tag_map)
+           
             source_chunks = response["source_documents"]
-            self.logger.info(f"Retrieved {len(source_chunks)} candidate chunks from the Retrieval QA chain.")
-            # # If BM25Retriever is available, log the scores for each doc
-            # if hasattr(self, 'bm25_retriever') and self.bm25_retriever is not None:
-            #     bm25_scores = self.bm25_retriever.get_scores(question)
-            #     # Map scores to doc content for logging
-            #     bm25_doc_scores = []
-            #     for doc, score in zip(self.bm25_retriever.docs, bm25_scores):
-            #         bm25_doc_scores.append({
-            #             'content': doc.page_content[:100],  # log only first 100 chars
-            #             'score': score
-            #         })
-            #     self.logger.info(f"BM25Retriever scores for query '{question}': {bm25_doc_scores}")
+            if self.metrics_enabled and self.stats_recorder and self.chunks_retrieved:
+                mmap = self.stats_recorder.new_measurement_map()
+                if mmap:
+                    mmap.measure_int_put(self.chunks_retrieved, len(source_chunks))
+                    mmap.record(tag_map)
+            self.logger.info(f"Retrieved {len(source_chunks)} candidate chunks from the Retrieval QA chain.")           
 
             # Fetch full payload from Qdrant for each doc if possible
             for doc in source_chunks:
@@ -170,21 +222,47 @@ class RAGQueryEngine:
                             doc.metadata.update(points[0].payload)
                     except Exception as e:
                         self.logger.warning(f"Could not fetch payload for chunk_id {chunk_id}: {e}")
-            
-           
 
-            # Rerank the chunks using cross-encoder
+            # Rerank the chunks using cross-encoder          
             self.logger.info(f"Reranking {len(source_chunks)} candidate chunks using cross-encoder.")
+            start_rerank = time.time()
             cross_inp = [[question, doc.page_content] for doc in source_chunks]
             cross_scores = self.cross_encoder.predict(cross_inp)
             scored_chunks = list(zip(cross_scores, source_chunks))
             scored_chunks.sort(key=lambda x: x[0], reverse=True)
             top_sortedchunks = [doc for score, doc in scored_chunks[:5]]
             self.logger.info(f"Top 5 chunks selected after reranking")
+            rerank_time = (time.time() - start_rerank) * 1000
+            if self.metrics_enabled and self.stats_recorder and self.rerank_latency:
+                mmap = self.stats_recorder.new_measurement_map()
+                if mmap:
+                    mmap.measure_float_put(self.rerank_latency, rerank_time)
+                    mmap.record(tag_map)
+
+            start_llm = time.time()
             answer = self.qa_chain.combine_documents_chain.run({
                 "input_documents": top_sortedchunks,
                 "question": question
             })
+
+            llm_time = (time.time() - start_llm) * 1000
+            if self.metrics_enabled and self.stats_recorder and self.llm_latency:
+                mmap = self.stats_recorder.new_measurement_map()
+                if mmap:
+                    mmap.measure_float_put(self.llm_latency, llm_time)
+                    mmap.record(tag_map)
+
+            if self.metrics_enabled and self.stats_recorder and self.token_usage:
+                mmap = self.stats_recorder.new_measurement_map()
+                if mmap:
+                    mmap.measure_int_put(self.token_usage, len(question.split()) + len(answer.split()))
+                    mmap.record(tag_map)
+
+            if self.metrics_enabled and self.stats_recorder and self.response_length:
+                mmap = self.stats_recorder.new_measurement_map()
+                if mmap:
+                    mmap.measure_int_put(self.response_length, len(answer))
+                    mmap.record(tag_map)
 
             sources = [
                 Source(
@@ -230,9 +308,9 @@ def run_streamlit_app():
     """Streamlit interface for the RAG Query Engine"""
     st.title("RAG Query Engine")
 
-    # Initialize the RAG query engine
     try:
-        rag_engine = RAGQueryEngine(collection_name="doc_chunk_embeddings")
+        # Initialize the RAG query engine
+        rag_engine = RAGQueryEngine(collection_name="rag_collection")
     except Exception as e:
         st.error(f"Failed to initialize RAG engine: {e}")
         return
@@ -266,5 +344,22 @@ def run_streamlit_app():
             st.warning("Please enter a question.")
 
 if __name__ == "__main__":
-    run_streamlit_app()
-    
+    #run_streamlit_app()
+    try:
+        rag_engine = RAGQueryEngine(collection_name="doc_chunk_embeddings")
+        if rag_engine.verify_connection():
+            question = "What are the main security risks in AI?"
+            print(f"Querying with: '{question}'")
+            result = rag_engine.search(question)
+            print("\nAnswer:")
+            print(result['answer'])
+            print(f"\nSources ({result['num_sources']} found):")
+            if result['sources']:
+                for i, source in enumerate(result['sources'], 1):
+                    print(f"  Source {i}:")
+                    print(f"    File Path: {source['metadata'].get('file_path', 'N/A')}")
+                    print(f"    Content: {source['content']}")
+            else:
+                print("No sources found.")
+    except Exception as e:
+        print(f"An error occurred: {e}")
