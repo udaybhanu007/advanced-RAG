@@ -344,22 +344,22 @@ def run_streamlit_app():
             st.warning("Please enter a question.")
 
 if __name__ == "__main__":
-    #run_streamlit_app()
-    try:
-        rag_engine = RAGQueryEngine(collection_name="doc_chunk_embeddings")
-        if rag_engine.verify_connection():
-            question = "What are the main security risks in AI?"
-            print(f"Querying with: '{question}'")
-            result = rag_engine.search(question)
-            print("\nAnswer:")
-            print(result['answer'])
-            print(f"\nSources ({result['num_sources']} found):")
-            if result['sources']:
-                for i, source in enumerate(result['sources'], 1):
-                    print(f"  Source {i}:")
-                    print(f"    File Path: {source['metadata'].get('file_path', 'N/A')}")
-                    print(f"    Content: {source['content']}")
-            else:
-                print("No sources found.")
-    except Exception as e:
-        print(f"An error occurred: {e}")
+    run_streamlit_app()
+    # try:
+    #     rag_engine = RAGQueryEngine(collection_name="doc_chunk_embeddings")
+    #     if rag_engine.verify_connection():
+    #         question = "What are the main security risks in AI?"
+    #         print(f"Querying with: '{question}'")
+    #         result = rag_engine.search(question)
+    #         print("\nAnswer:")
+    #         print(result['answer'])
+    #         print(f"\nSources ({result['num_sources']} found):")
+    #         if result['sources']:
+    #             for i, source in enumerate(result['sources'], 1):
+    #                 print(f"  Source {i}:")
+    #                 print(f"    File Path: {source['metadata'].get('file_path', 'N/A')}")
+    #                 print(f"    Content: {source['content']}")
+    #         else:
+    #             print("No sources found.")
+    # except Exception as e:
+    #     print(f"An error occurred: {e}")
