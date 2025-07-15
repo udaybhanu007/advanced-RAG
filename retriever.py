@@ -36,7 +36,8 @@ class RAGResponse(BaseModel):
 
 class RAGQueryEngine:
     """RAG Query Engine using Qdrant vector store"""
-   
+
+    #region Init & Setup
     def __init__(self, collection_name: str = "rag_documents",
                  qdrant_host: str = "localhost", qdrant_port: int = 6333):
         self.collection_name = collection_name
@@ -49,23 +50,32 @@ class RAGQueryEngine:
         self.qa_chain = None
         self.content_payload_key = "content"
         self.cross_encoder = CrossEncoder('cross-encoder/ms-marco-MiniLM-L6-v2')
-        # Setup logging
+        # Setup logging and metrics
         self.logger = logging.getLogger("RAGMetricsLogger")
         self.logger.setLevel(logging.INFO)
-        azure_key = os.environ.get("AZURE_LOG_INSTRUMENTATION_KEY")
         self.metrics_enabled = False
+        self._setup_opencensus_logging_and_metrics()
+        self._setup_retrieval_chain()
+
+    def _setup_opencensus_logging_and_metrics(self):
+        """
+        Setup OpenCensus logging and metrics exporters.
+        """
+        azure_key = os.environ.get("AZURE_LOG_INSTRUMENTATION_KEY")
+        self.stats = None
+        self.view_manager = None
+        self.stats_recorder = None
+        self.exporter = None
         if azure_key:
             try:
-                self.logger.addHandler(AzureLogHandler(connection_string=azure_key))
-                self.stats = stats_module.stats
-                self.view_manager = self.stats.view_manager
-                self.stats_recorder = self.stats.stats_recorder
-                self.exporter = new_metrics_exporter(connection_string=f"{azure_key}")
-                self.view_manager.register_exporter(self.exporter)
-                self._register_metrics()                
+                self._add_azure_log_handler(azure_key)
+                self._init_opencensus_stats_exporter(azure_key)
+                self._register_metrics()
                 self.metrics_enabled = True
             except Exception as e:
-                self.logger.warning(f"Azure metrics setup failed: {e}")
+                self.logger.warning(
+                    f"Azure metrics setup failed: {e}"
+                )
                 self.metrics_enabled = False
                 self.stats = None
                 self.view_manager = None
@@ -77,9 +87,26 @@ class RAGQueryEngine:
             self.view_manager = None
             self.stats_recorder = None
             self.exporter = None
-        self._setup_retrieval_chain()
-   
-    
+
+    def _add_azure_log_handler(self, azure_key):
+        """
+        Add AzureLogHandler to logger.
+        """
+        handler = AzureLogHandler(connection_string=azure_key)
+        self.logger.addHandler(handler)
+
+    def _init_opencensus_stats_exporter(self, azure_key):
+        """
+        Initialize OpenCensus stats, view manager, stats recorder, and exporter.
+        """
+        self.stats = stats_module.stats
+        self.view_manager = self.stats.view_manager
+        self.stats_recorder = self.stats.stats_recorder
+        self.exporter = new_metrics_exporter(
+            connection_string=f"{azure_key}"
+        )
+        self.view_manager.register_exporter(self.exporter)
+
     def _register_metrics(self):
         # Define measures
         self.retrieval_latency = measure_module.MeasureFloat("retrieval_latency", "Time to fetch chunks", "ms")
@@ -105,61 +132,15 @@ class RAGQueryEngine:
     def _setup_retrieval_chain(self):
         """
         Sets up the RetrievalQA chain using a hybrid retrieval approach that combines Qdrant vector search and BM25 keyword search.
-        This method performs the following steps:
-        1. Initializes a Qdrant vector store with the specified collection and embedding model.
-        2. Fetches all documents from the Qdrant collection to build a BM25Retriever for keyword-based retrieval.
-        3. Creates a vector retriever from the Qdrant vector store.
-        4. Combines the vector retriever and BM25 retriever using an EnsembleRetriever for hybrid search, or uses only the vector retriever if BM25 is unavailable.
-        5. Initializes an AzureChatOpenAI LLM with environment variables for deployment and API configuration.
-        6. Constructs a RetrievalQA chain that uses the hybrid retriever and the LLM for question answering, returning both answers and source documents.
         """
         try:
             self.logger.info("Initializing Qdrant vector store and retrievers...")
-            self.vectorstore = Qdrant(
-                client=self.qdrant_client,
-                collection_name=self.collection_name,
-                embeddings=self.embeddings,
-                content_payload_key=self.content_payload_key
-            )
-
-            all_docs = []
-            try:
-                points, _ = self.qdrant_client.scroll(collection_name=self.collection_name, limit=10000)
-                for pt in points:
-                    content = pt.payload.get(self.content_payload_key, "")
-                    meta = pt.payload.copy()
-                    all_docs.append(Document(page_content=content, metadata=meta))
-                self.logger.info(f"Fetched {len(all_docs)} documents for BM25Retriever.")
-            except Exception as e:
-                self.logger.warning(f"Could not fetch all docs for BM25: {e}")
-
-            bm25_retriever = None
-            self.bm25_retriever = None
-            if all_docs:
-                bm25_retriever = BM25Retriever.from_documents(all_docs, k=10)
-                self.bm25_retriever = bm25_retriever
-                self.logger.info("BM25Retriever initialized.")
-
+            self._init_vectorstore()
+            all_docs = self._fetch_all_documents_for_bm25()
+            bm25_retriever = self._init_bm25_retriever(all_docs)
             vector_retriever = self.vectorstore.as_retriever(search_kwargs={"k": 10})
-
-            if bm25_retriever:
-                hybrid_retriever = EnsembleRetriever(
-                    retrievers=[vector_retriever, bm25_retriever],
-                    weights=[0.5, 0.5]
-                )
-                self.logger.info("Hybrid (Ensemble) retriever initialized.")
-            else:
-                hybrid_retriever = vector_retriever
-                self.logger.info("Only vector retriever initialized.")
-
-            llm = AzureChatOpenAI(
-                deployment_name=os.environ["deployment_name"],
-                openai_api_key=os.environ["openai_api_key"],
-                azure_endpoint=os.environ["azure_endpoint"],
-                openai_api_version=os.environ["openai_api_version"],
-                temperature=0.2,
-            )
-            self.logger.info("LLM initialized.")
+            hybrid_retriever = self._get_hybrid_retriever(vector_retriever, bm25_retriever)
+            llm = self._init_llm()
             self.qa_chain = RetrievalQA.from_chain_type(
                 llm=llm,
                 chain_type="stuff",
@@ -167,22 +148,70 @@ class RAGQueryEngine:
                 return_source_documents=True,
                 verbose=True
             )
-
             self.logger.info(f"RetrievalQA hybrid chain setup successful with collection: {self.collection_name}")
-
         except Exception as e:
             self.logger.error(f"Error setting up RetrievalQA chain: {str(e)}")
             raise
-    
+
+    def _init_vectorstore(self):
+        self.vectorstore = Qdrant(
+            client=self.qdrant_client,
+            collection_name=self.collection_name,
+            embeddings=self.embeddings,
+            content_payload_key=self.content_payload_key
+        )
+
+    def _fetch_all_documents_for_bm25(self):
+        all_docs = []
+        try:
+            points, _ = self.qdrant_client.scroll(
+                collection_name=self.collection_name,
+                limit=10000
+            )
+            for pt in points:
+                content = pt.payload.get(self.content_payload_key, "")
+                meta = pt.payload.copy()
+                all_docs.append(Document(page_content=content, metadata=meta))
+            self.logger.info(f"Fetched {len(all_docs)} documents for BM25Retriever.")
+        except Exception as e:
+            self.logger.warning(f"Could not fetch all docs for BM25: {e}")
+        return all_docs
+
+    def _init_bm25_retriever(self, all_docs):
+        bm25_retriever = None
+        self.bm25_retriever = None
+        if all_docs:
+            bm25_retriever = BM25Retriever.from_documents(all_docs, k=10)
+            self.bm25_retriever = bm25_retriever
+            self.logger.info("BM25Retriever initialized.")
+        return bm25_retriever
+
+    def _get_hybrid_retriever(self, vector_retriever, bm25_retriever):
+        if bm25_retriever:
+            hybrid_retriever = EnsembleRetriever(
+                retrievers=[vector_retriever, bm25_retriever],
+                weights=[0.5, 0.5]
+            )
+            self.logger.info("Hybrid (Ensemble) retriever initialized.")
+        else:
+            hybrid_retriever = vector_retriever
+            self.logger.info("Only vector retriever initialized.")
+        return hybrid_retriever
+
+    def _init_llm(self):
+        return AzureChatOpenAI(
+            deployment_name=os.environ["deployment_name"],
+            openai_api_key=os.environ["openai_api_key"],
+            azure_endpoint=os.environ["azure_endpoint"],
+            openai_api_version=os.environ["openai_api_version"],
+            temperature=0.2,
+        )
+    #endregion
+
+    #region Query & Search
     def search(self, question: str) -> dict:
         """
         Query the RAG (Retrieval-Augmented Generation) system with a given question and return a structured response.
-        This method performs the following steps:
-        1. Invokes the QA chain to retrieve initial candidate documents relevant to the question.
-        2. Attempts to enrich each candidate document's metadata by fetching the full payload from Qdrant using the document's chunk ID.
-        3. Reranks the retrieved documents using a cross-encoder model to select the top 5 most relevant chunks.
-        4. Generates an answer using only the top 5 re-ranked chunks via the QA chain's document combination mechanism.
-        5. Constructs and returns a structured response containing the question, generated answer, source documents, and the number of sources.
         """
         if not self.qa_chain:
             raise ValueError("QA chain not initialized")
@@ -191,78 +220,34 @@ class RAGQueryEngine:
             tag_map = tag_map_module.TagMap()
             self.metrics_enabled = True
             self.logger.info(f"Received query: {question}")
-            # Record retrieval latency
-            start_retrieval = time.time()         
+
+            # Retrieval
+            start_retrieval = time.time()
             response = self.qa_chain.invoke({"query": question})
             retrieval_time = (time.time() - start_retrieval) * 1000
-            if self.metrics_enabled and self.stats_recorder and self.retrieval_latency:
-                mmap = self.stats_recorder.new_measurement_map()
-                if mmap:
-                    mmap.measure_float_put(self.retrieval_latency, retrieval_time)
-                    mmap.record(tag_map)
-           
+            self._record_metric(self.retrieval_latency, retrieval_time, tag_map)
+
             source_chunks = response["source_documents"]
-            if self.metrics_enabled and self.stats_recorder and self.chunks_retrieved:
-                mmap = self.stats_recorder.new_measurement_map()
-                if mmap:
-                    mmap.measure_int_put(self.chunks_retrieved, len(source_chunks))
-                    mmap.record(tag_map)
-            self.logger.info(f"Retrieved {len(source_chunks)} candidate chunks from the Retrieval QA chain.")           
+            self._record_metric(self.chunks_retrieved, len(source_chunks), tag_map)
+            self.logger.info(f"Retrieved {len(source_chunks)} candidate chunks from the Retrieval QA chain.")
 
-            # Fetch full payload from Qdrant for each doc if possible
-            for doc in source_chunks:
-                chunk_id = doc.metadata.get('chunk_id') or doc.metadata.get('_id')
-                if chunk_id:
-                    try:
-                        points = self.qdrant_client.retrieve(
-                            collection_name=self.collection_name,
-                            ids=[chunk_id]
-                        )
-                        if points and hasattr(points[0], 'payload') and isinstance(points[0].payload, dict):
-                            doc.metadata.update(points[0].payload)
-                    except Exception as e:
-                        self.logger.warning(f"Could not fetch payload for chunk_id {chunk_id}: {e}")
+            # Enrich metadata
+            self._enrich_source_chunks_metadata(source_chunks)
 
-            # Rerank the chunks using cross-encoder          
-            self.logger.info(f"Reranking {len(source_chunks)} candidate chunks using cross-encoder.")
-            start_rerank = time.time()
-            cross_inp = [[question, doc.page_content] for doc in source_chunks]
-            cross_scores = self.cross_encoder.predict(cross_inp)
-            scored_chunks = list(zip(cross_scores, source_chunks))
-            scored_chunks.sort(key=lambda x: x[0], reverse=True)
-            top_sortedchunks = [doc for score, doc in scored_chunks[:5]]
-            self.logger.info(f"Top 5 chunks selected after reranking")
-            rerank_time = (time.time() - start_rerank) * 1000
-            if self.metrics_enabled and self.stats_recorder and self.rerank_latency:
-                mmap = self.stats_recorder.new_measurement_map()
-                if mmap:
-                    mmap.measure_float_put(self.rerank_latency, rerank_time)
-                    mmap.record(tag_map)
+            # Rerank
+            top_sortedchunks, rerank_time = self._rerank_chunks(question, source_chunks)
+            self._record_metric(self.rerank_latency, rerank_time, tag_map)
 
+            # LLM answer
             start_llm = time.time()
             answer = self.qa_chain.combine_documents_chain.run({
                 "input_documents": top_sortedchunks,
                 "question": question
             })
-
             llm_time = (time.time() - start_llm) * 1000
-            if self.metrics_enabled and self.stats_recorder and self.llm_latency:
-                mmap = self.stats_recorder.new_measurement_map()
-                if mmap:
-                    mmap.measure_float_put(self.llm_latency, llm_time)
-                    mmap.record(tag_map)
-
-            if self.metrics_enabled and self.stats_recorder and self.token_usage:
-                mmap = self.stats_recorder.new_measurement_map()
-                if mmap:
-                    mmap.measure_int_put(self.token_usage, len(question.split()) + len(answer.split()))
-                    mmap.record(tag_map)
-
-            if self.metrics_enabled and self.stats_recorder and self.response_length:
-                mmap = self.stats_recorder.new_measurement_map()
-                if mmap:
-                    mmap.measure_int_put(self.response_length, len(answer))
-                    mmap.record(tag_map)
+            self._record_metric(self.llm_latency, llm_time, tag_map)
+            self._record_metric(self.token_usage, len(question.split()) + len(answer.split()), tag_map)
+            self._record_metric(self.response_length, len(answer), tag_map)
 
             sources = [
                 Source(
@@ -290,7 +275,45 @@ class RAGQueryEngine:
                 num_sources=0
             )
             return error_response.model_dump()
-   
+
+    def _record_metric(self, metric, value, tag_map):
+        if self.metrics_enabled and self.stats_recorder and metric:
+            mmap = self.stats_recorder.new_measurement_map()
+            if mmap:
+                if isinstance(value, float):
+                    mmap.measure_float_put(metric, value)
+                else:
+                    mmap.measure_int_put(metric, value)
+                mmap.record(tag_map)
+
+    def _enrich_source_chunks_metadata(self, source_chunks):
+        for doc in source_chunks:
+            chunk_id = doc.metadata.get('chunk_id') or doc.metadata.get('_id')
+            if chunk_id:
+                try:
+                    points = self.qdrant_client.retrieve(
+                        collection_name=self.collection_name,
+                        ids=[chunk_id]
+                    )
+                    if points and hasattr(points[0], 'payload') and isinstance(points[0].payload, dict):
+                        doc.metadata.update(points[0].payload)
+                except Exception as e:
+                    self.logger.warning(f"Could not fetch payload for chunk_id {chunk_id}: {e}")
+
+    def _rerank_chunks(self, question, source_chunks):
+        self.logger.info(f"Reranking {len(source_chunks)} candidate chunks using cross-encoder.")
+        start_rerank = time.time()
+        cross_inp = [[question, doc.page_content] for doc in source_chunks]
+        cross_scores = self.cross_encoder.predict(cross_inp)
+        scored_chunks = list(zip(cross_scores, source_chunks))
+        scored_chunks.sort(key=lambda x: x[0], reverse=True)
+        top_sortedchunks = [doc for score, doc in scored_chunks[:5]]
+        self.logger.info(f"Top 5 chunks selected after reranking")
+        rerank_time = (time.time() - start_rerank) * 1000
+        return top_sortedchunks, rerank_time
+    #endregion
+
+    #region Utility
     def verify_connection(self):
         """Verify Qdrant connection and collection status"""
         try:
@@ -302,6 +325,7 @@ class RAGQueryEngine:
         except Exception as e:
             print(f"❌ Connection verification failed: {str(e)}")
             return False
+    #endregion
  
  
 def run_streamlit_app():
@@ -332,16 +356,21 @@ def run_streamlit_app():
             st.write(result['answer'])
             
             st.subheader(f"Sources ({result['num_sources']} found)")
-            if result['sources']:
-                for i, source in enumerate(result['sources'], 1):
-                    with st.expander(f"Source {i}: {source['metadata'].get('source', 'Unknown')}"):
-                        st.write(f"**File Path:** {source['metadata'].get('file_path', 'N/A')}")
-                        st.write(f"**Content:** {source['content']}")
-                        
-            else:
-                st.write("No sources found.")
+            _display_sources_streamlit(result['sources'])
         else:
             st.warning("Please enter a question.")
+
+def _display_sources_streamlit(sources):
+    """
+    Display sources in Streamlit UI.
+    """
+    if sources:
+        for i, source in enumerate(sources, 1):
+            with st.expander(f"Source {i}: {source['metadata'].get('source', 'Unknown')}"):
+                st.write(f"**File Path:** {source['metadata'].get('file_path', 'N/A')}")
+                st.write(f"**Content:** {source['content']}")
+    else:
+        st.write("No sources found.")
 
 if __name__ == "__main__":
     run_streamlit_app()
