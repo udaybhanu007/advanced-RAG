@@ -23,10 +23,10 @@ load_dotenv()
 
 def initialize_llm():
   return AzureChatOpenAI(      
-      azure_deployment=os.getenv("AZURE_OPENAI_DEPLOYMENT"),
-      api_version=os.getenv("AZURE_OPENAI_API_VERSION"),
+      azure_deployment=os.getenv("deployment_name"),
+      api_version=os.getenv("openai_api_version"),
       temperature=0.0,
-      azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT")
+      azure_endpoint=os.getenv("azure_endpoint")
   )
 
 tavily_api_key = os.getenv("TAVILY_API_KEY")
@@ -199,90 +199,90 @@ graph = builder.compile()
 
 
 
-# import streamlit as st
+import streamlit as st
 
-# def main():
-#     st.title("Financial Performance Reporting Agent")
-#     task = st.text_input(
-#         "Enter the task:",
-#         "Analyze the financial performance of our company HCLTech compared to competitors",
-#     )
-#     competitors = st.text_area("Enter competitor names (one per line):").split("\n")
-#     max_revisions = st.number_input("Max Revisions", min_value=1, value=2)
-#     uploaded_file = st.file_uploader(
-#         "Upload a CSV file with the company's financial data", type=["csv"]
-#     )
-#     if uploaded_file is not None and st.button("Start Analysis"):
-#         csv_data = uploaded_file.getvalue().decode("utf-8")
+def main():
+    st.title("Financial Performance Reporting Agent")
+    task = st.text_input(
+        "Enter the task:",
+        "Analyze the financial performance of our company HCLTech compared to competitors",
+    )
+    competitors = st.text_area("Enter competitor names (one per line):").split("\n")
+    max_revisions = st.number_input("Max Revisions", min_value=1, value=2)
+    uploaded_file = st.file_uploader(
+        "Upload a CSV file with the company's financial data", type=["csv"]
+    )
+    if uploaded_file is not None and st.button("Start Analysis"):
+        csv_data = uploaded_file.getvalue().decode("utf-8")
 
-#         # Initialize state with all required keys
+        # Initialize state with all required keys
 
-#         initial_state = {
+        initial_state = {
 
-#             "task": task,
-#             "competitors": [comp.strip() for comp in competitors if comp.strip()],
-#             "csv_file": csv_data,
-#             "max_revisions": max_revisions,
-#             "revision_number": 1,
-#             # Add these initialized keys
-#             "content": [],
-#             "financial_data": "",
-#             "analysis": "",
-#             "competitor_data": "",
-#             "comparison": "",
-#             "feedback": "",
-#             "report": "",
-#         }
+            "task": task,
+            "competitors": [comp.strip() for comp in competitors if comp.strip()],
+            "csv_file": csv_data,
+            "max_revisions": max_revisions,
+            "revision_number": 1,
+            # Add these initialized keys
+            "content": [],
+            "financial_data": "",
+            "analysis": "",
+            "competitor_data": "",
+            "comparison": "",
+            "feedback": "",
+            "report": "",
+        }
 
-#         state_placeholder = st.empty()
+        state_placeholder = st.empty()
 
-#         thread = {"configurable": {"thread_id": "1"}}
+        thread = {"configurable": {"thread_id": "1"}}
 
-#         try:
-#             final_state = None
-#             for s in graph.stream(initial_state):  # type: ignore
-#                 with state_placeholder.container():
-#                     st.write("Current State:", s)
-#                 final_state = s
+        try:
+            final_state = None
+            for s in graph.stream(initial_state):  # type: ignore
+                with state_placeholder.container():
+                    st.write("Current State:", s)
+                final_state = s
 
-#             if final_state and "report" in final_state:
-#                 st.subheader("Final Report")
-#                 st.markdown(final_state["report"])
+            if final_state and "report" in final_state:
+                st.subheader("Final Report")
+                st.markdown(final_state["report"])
 
-#         except Exception as e:
-#             st.error(f"An error occurred: {str(e)}")
-
-# if __name__ == "__main__":
-#     main()
-
-# Debugging code to run pipeline without UI
-def debug_main():
-    # Provide a sample CSV string for debugging
-    csv_data = """Year,Revenue,Profit\n2022,100000,10000\n2023,120000,15000"""
-    initial_state = {
-        "task": "Analyze the financial performance of our company HCL compared to competitors",
-        "competitors": ["TCS", "Infosys"],
-        "csv_file": csv_data,
-        "max_revisions": 2,
-        "revision_number": 1,
-        "content": [],
-        "financial_data": "",
-        "analysis": "",
-        "competitor_data": "",
-        "comparison": "",
-        "feedback": "",
-        "report": "",
-    }
-    print("Initial State:", initial_state)
-    try:
-        final_state = None
-        for s in graph.stream(initial_state):  # type: ignore
-            print("Current State:", s)
-            final_state = s
-        if final_state and "report" in final_state:
-            print("\nFinal Report:\n", final_state["report"])
-    except Exception as e:
-        print(f"An error occurred: {str(e)}")
+        except Exception as e:
+            st.error(f"An error occurred: {str(e)}")
 
 if __name__ == "__main__":
-    debug_main()
+    main()
+
+# Debugging code to run pipeline without UI
+# def debug_main():
+#     # Provide a sample CSV string for debugging
+#     csv_data = """Year,Revenue,Profit\n2022,100000,10000\n2023,120000,15000"""
+#     initial_state = {
+#         "task": "Analyze the financial performance of our company HCL compared to competitors",
+#         "competitors": ["TCS", "Infosys"],
+#         "csv_file": csv_data,
+#         "max_revisions": 2,
+#         "revision_number": 1,
+#         "content": [],
+#         "financial_data": "",
+#         "analysis": "",
+#         "competitor_data": "",
+#         "comparison": "",
+#         "feedback": "",
+#         "report": "",
+#     }
+#     print("Initial State:", initial_state)
+#     try:
+#         final_state = None
+#         for s in graph.stream(initial_state):  # type: ignore
+#             print("Current State:", s)
+#             final_state = s
+#         if final_state and "report" in final_state:
+#             print("\nFinal Report:\n", final_state["report"])
+#     except Exception as e:
+#         print(f"An error occurred: {str(e)}")
+
+# if __name__ == "__main__":
+#     debug_main()
