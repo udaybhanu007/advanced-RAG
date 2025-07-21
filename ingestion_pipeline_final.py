@@ -13,7 +13,11 @@ from azure.ai.contentsafety import ContentSafetyClient
 from azure.ai.contentsafety.models import AnalyzeTextOptions
 from azure.core.credentials import AzureKeyCredential
 from dotenv import load_dotenv
-
+#from langchain.callbacks.tracers import LangChainTracer
+from langsmith import traceable
+ 
+#tracer = LangChainTracer(project_name="RAG Ingestion Pipeline")
+ 
 # Load environment variables
 load_dotenv()
 AZURE_KEY = os.getenv("AZURE_CS_KEY")
@@ -30,7 +34,13 @@ MIN_WORD_COUNT = 40
 # Initialize services
 nlp = spacy.load("en_core_web_sm")
 embedder = SentenceTransformer("all-MiniLM-L6-v2")
-qdrant = QdrantClient("localhost", port=6333)
+# qdrant = QdrantClient("localhost", port=6333)
+qdrant = QdrantClient(
+    url=os.environ.get("qdrant-url"),
+    api_key=os.environ.get("qdrant-api-key")
+)
+
+print(qdrant.get_collections())
 
 try:
     safety_client = ContentSafetyClient(endpoint=AZURE_ENDPOINT, credential=AzureKeyCredential(AZURE_KEY))
@@ -190,7 +200,7 @@ def process_file(file_path: str) -> List[Dict]:
         return []
 
 # ---------- CHUNK BUILDER ----------
-
+@traceable
 def build_chunks(sections: List[Dict]) -> List[Dict]:
     all_chunks = []
     for sec_idx, section in enumerate(sections):
@@ -211,7 +221,7 @@ def build_chunks(sections: List[Dict]) -> List[Dict]:
     return all_chunks
 
 # ---------- QDRANT INGEST ----------
-
+@traceable
 def ingest_chunks_to_qdrant(chunks: List[Dict]):
     if not chunks:
         print("⚠️ No chunks to embed.")
