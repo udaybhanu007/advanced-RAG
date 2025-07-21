@@ -1,0 +1,9 @@
+pymupdf
+python-docx
+pandas
+spacy
+tqdm
+sentence-transformers
+qdrant-client
+python-dotenv
+azure-ai-contentsafety
