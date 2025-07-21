@@ -38,7 +38,7 @@ class RAGQueryEngine:
     """RAG Query Engine using Qdrant vector store"""
 
     #region Init & Setup
-    def __init__(self, collection_name: str = "rag_documents",
+    def __init__(self, collection_name: str = "rag_collection",
                  qdrant_host: str = "localhost", qdrant_port: int = 6333):
         self.collection_name = collection_name
         self.qdrant_client = QdrantClient(host=qdrant_host, port=qdrant_port)
@@ -222,13 +222,13 @@ class RAGQueryEngine:
             self.logger.info(f"Received query: {question}")
 
             # Retrieval
-            start_retrieval = time.time()
+            #start_retrieval = time.time()
             response = self.qa_chain.invoke({"query": question})
-            retrieval_time = (time.time() - start_retrieval) * 1000
-            self._record_metric(self.retrieval_latency, retrieval_time, tag_map)
+            #retrieval_time = (time.time() - start_retrieval) * 1000
+            #self._record_metric(self.retrieval_latency, retrieval_time, tag_map)
 
             source_chunks = response["source_documents"]
-            self._record_metric(self.chunks_retrieved, len(source_chunks), tag_map)
+            #self._record_metric(self.chunks_retrieved, len(source_chunks), tag_map)
             self.logger.info(f"Retrieved {len(source_chunks)} candidate chunks from the Retrieval QA chain.")
 
             # Enrich metadata
@@ -236,7 +236,7 @@ class RAGQueryEngine:
 
             # Rerank
             top_sortedchunks, rerank_time = self._rerank_chunks(question, source_chunks)
-            self._record_metric(self.rerank_latency, rerank_time, tag_map)
+            #self._record_metric(self.rerank_latency, rerank_time, tag_map)
 
             # LLM answer
             start_llm = time.time()
@@ -244,10 +244,11 @@ class RAGQueryEngine:
                 "input_documents": top_sortedchunks,
                 "question": question
             })
-            llm_time = (time.time() - start_llm) * 1000
-            self._record_metric(self.llm_latency, llm_time, tag_map)
-            self._record_metric(self.token_usage, len(question.split()) + len(answer.split()), tag_map)
-            self._record_metric(self.response_length, len(answer), tag_map)
+
+            # llm_time = (time.time() - start_llm) * 1000
+            # self._record_metric(self.llm_latency, llm_time, tag_map)
+            # self._record_metric(self.token_usage, len(question.split()) + len(answer.split()), tag_map)
+            # self._record_metric(self.response_length, len(answer), tag_map)
 
             sources = [
                 Source(
@@ -276,15 +277,15 @@ class RAGQueryEngine:
             )
             return error_response.model_dump()
 
-    def _record_metric(self, metric, value, tag_map):
-        if self.metrics_enabled and self.stats_recorder and metric:
-            mmap = self.stats_recorder.new_measurement_map()
-            if mmap:
-                if isinstance(value, float):
-                    mmap.measure_float_put(metric, value)
-                else:
-                    mmap.measure_int_put(metric, value)
-                mmap.record(tag_map)
+    # def _record_metric(self, metric, value, tag_map):
+    #     if self.metrics_enabled and self.stats_recorder and metric:
+    #         mmap = self.stats_recorder.new_measurement_map()
+    #         if mmap:
+    #             if isinstance(value, float):
+    #                 mmap.measure_float_put(metric, value)
+    #             else:
+    #                 mmap.measure_int_put(metric, value)
+    #             mmap.record(tag_map)
 
     def _enrich_source_chunks_metadata(self, source_chunks):
         for doc in source_chunks:
