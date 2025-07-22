@@ -1,3 +1,5 @@
+requirement
+
 pymupdf
 python-docx
 pandas
@@ -7,3 +9,7 @@ sentence-transformers
 qdrant-client
 python-dotenv
 azure-ai-contentsafety
+azure-storage-blob
+langsmith
+azure-core
+# Run: python -m spacy download en_core_web_sm
