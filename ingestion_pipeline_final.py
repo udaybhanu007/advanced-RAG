@@ -70,7 +70,7 @@ def download_files_from_blob():
     """Download all files from Azure Blob Storage to local source_documents folder"""
     if not container_client:
         print("⚠️ Blob Storage not configured, skipping download")
-        return
+        return {}
     
     # Create source folder if it doesn't exist
     os.makedirs(SOURCE_FOLDER, exist_ok=True)
@@ -79,6 +79,7 @@ def download_files_from_blob():
         print(f"📥 Downloading files from blob container: {AZURE_BLOB_CONTAINER}")
         blob_list = container_client.list_blobs()
         downloaded_count = 0
+        blob_path_mapping = {}  # Track blob paths for metadata
         
         for blob in blob_list:
             local_file_path = os.path.join(SOURCE_FOLDER, blob.name)
@@ -95,15 +96,24 @@ def download_files_from_blob():
                     blob_client = container_client.get_blob_client(blob.name)
                     download_file.write(blob_client.download_blob().readall())
                 downloaded_count += 1
+                
+                # Store mapping of local path to Azure blob path
+                azure_blob_url = f"https://{blob_service_client.account_name}.blob.core.windows.net/{AZURE_BLOB_CONTAINER}/{blob.name}"
+                blob_path_mapping[local_file_path] = {
+                    "blob_name": blob.name,
+                    "azure_url": azure_blob_url,
+                    "container": AZURE_BLOB_CONTAINER
+                }
+                
             except Exception as e:
                 print(f"❌ Failed to download {blob.name}: {e}")
                 
         print(f"✅ Downloaded {downloaded_count} files to {SOURCE_FOLDER}")
-        return downloaded_count
+        return blob_path_mapping
         
     except Exception as e:
         print(f"❌ Error downloading from blob storage: {e}")
-        return 0
+        return {}
 
 def upload_file_to_blob(local_file_path: str, blob_name: str = None):
     """Upload a single file to Azure Blob Storage"""
@@ -332,16 +342,24 @@ def read_txt(file_path: str) -> List[str]:
     with open(file_path, "r", encoding="utf-8") as f:
         return f.readlines()
 
-def read_xlsx(file_path: str) -> List[Dict]:
+def read_xlsx(file_path: str, blob_info: dict = None) -> List[Dict]:
     xls = pd.ExcelFile(file_path)
     sections = []
+    
+    # Use Azure blob path if available, otherwise local path
+    azure_path = blob_info["azure_url"] if blob_info else file_path
+    blob_name = blob_info["blob_name"] if blob_info else os.path.basename(file_path)
+    container_name = blob_info["container"] if blob_info else "local"
+    
     for sheet in xls.sheet_names:
         content = xls.parse(sheet).to_string()
         sections.append({
             "section_title": sheet,
             "section_path": sheet,
             "content": content,
-            "file_path": file_path,
+            "file_path": azure_path,  # Now using Azure blob URL
+            "blob_name": blob_name,
+            "container": container_name,
             "document": os.path.basename(file_path)
         })
     return sections
@@ -382,7 +400,7 @@ def is_meaningful_section(content: str, title: str) -> bool:
     
     return True
 
-def extract_sections(lines: List[str], headings: List[tuple], file_path: str, document_name: str) -> List[Dict]:
+def extract_sections(lines: List[str], headings: List[tuple], file_path: str, document_name: str, blob_info: dict = None) -> List[Dict]:
     sections = []
     for idx, (line_no, title) in enumerate(headings):
         start = line_no + 1
@@ -396,12 +414,19 @@ def extract_sections(lines: List[str], headings: List[tuple], file_path: str, do
         # Check if section is meaningful
         if not is_meaningful_section(content, title):
             continue
+        
+        # Use Azure blob path if available, otherwise local path
+        azure_path = blob_info["azure_url"] if blob_info else file_path
+        blob_name = blob_info["blob_name"] if blob_info else document_name
+        container_name = blob_info["container"] if blob_info else "local"
             
         sections.append({
             "section_title": title,
             "section_path": title,
             "content": content,
-            "file_path": file_path,
+            "file_path": azure_path,  # Now using Azure blob URL
+            "blob_name": blob_name,
+            "container": container_name,
             "document": document_name
         })
     return sections
@@ -454,24 +479,24 @@ def is_chunk_safe(text: str) -> bool:
 
 # ---------- MAIN PROCESSOR ----------
 
-def process_file(file_path: str) -> List[Dict]:
+def process_file(file_path: str, blob_info: dict = None) -> List[Dict]:
     ext = os.path.splitext(file_path)[1].lower()
     filename = os.path.basename(file_path)
 
     if ext == ".pdf":
         lines = clean_lines(read_pdf(file_path))
         headings = detect_headings(lines)
-        return extract_sections(lines, headings, file_path, filename)
+        return extract_sections(lines, headings, file_path, filename, blob_info)
     elif ext == ".docx":
         lines = clean_lines(read_docx(file_path))
         headings = detect_headings(lines)
-        return extract_sections(lines, headings, file_path, filename)
+        return extract_sections(lines, headings, file_path, filename, blob_info)
     elif ext == ".txt":
         lines = clean_lines(read_txt(file_path))
         headings = detect_headings(lines)
-        return extract_sections(lines, headings, file_path, filename)
+        return extract_sections(lines, headings, file_path, filename, blob_info)
     elif ext in [".xlsx", ".xls"]:
-        return read_xlsx(file_path)
+        return read_xlsx(file_path, blob_info)
     else:
         print(f"⚠️ Unsupported file: {file_path}")
         return []
@@ -506,7 +531,9 @@ def build_chunks(sections: List[Dict]) -> List[Dict]:
                 
             all_chunks.append({
                 "document": section["document"],
-                "file_path": section["file_path"],
+                "file_path": section["file_path"],  # This is now the Azure blob URL
+                "blob_name": section.get("blob_name", section["document"]),
+                "container": section.get("container", "unknown"),
                 "section_title": section["section_title"],
                 "section_path": section["section_path"],
                 "chunk_index": f"{sec_idx}_{i}",
@@ -570,9 +597,9 @@ def ingest_chunks_to_qdrant(chunks: List[Dict]):
 def main():
     print("🚀 Starting Ingestion Pipeline...")
     
-    # First, download files from blob storage
+    # First, download files from blob storage and get path mapping
     print("📥 Step 1: Downloading files from Azure Blob Storage...")
-    download_files_from_blob()
+    blob_path_mapping = download_files_from_blob()
     
     # Check if source folder exists and has files
     if not os.path.exists(SOURCE_FOLDER):
@@ -588,12 +615,16 @@ def main():
     
     print(f"📁 Found {len(files_in_folder)} files to process")
     
-    # Process all files
+    # Process all files with blob path information
     all_sections = []
     for file in files_in_folder:
         file_path = os.path.join(SOURCE_FOLDER, file)
         print(f"📄 Processing: {file}")
-        sections = process_file(file_path)
+        
+        # Get blob info for this file
+        blob_info = blob_path_mapping.get(file_path)
+        
+        sections = process_file(file_path, blob_info)
         all_sections.extend(sections)
 
     print(f"📚 Total extracted sections: {len(all_sections)}")
