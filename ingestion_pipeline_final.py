@@ -40,8 +40,8 @@ embedder = SentenceTransformer("all-MiniLM-L6-v2")
 # Initialize Qdrant client with error handling
 try:
     qdrant = QdrantClient(
-        url=os.environ.get("QDRANT_URL"),
-        api_key=os.environ.get("QDRANT_API_KEY")
+        url=os.environ.get("qdrant-url"),
+        api_key=os.environ.get("qdrant-api-key")
     )
     print("✅ Qdrant client initialized")
 except Exception as e:

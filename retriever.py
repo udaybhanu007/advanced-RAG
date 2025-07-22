@@ -23,6 +23,7 @@ from opencensus.ext.azure.metrics_exporter import new_metrics_exporter
 from opencensus.ext.azure.log_exporter import AzureLogHandler
 #from langchain.callbacks.tracers import LangChainTracer
 from langsmith import traceable
+import urllib.parse
 
 #tracer = LangChainTracer(project_name="RAG Retriever")
 class Source(BaseModel):
@@ -342,7 +343,7 @@ class RAGQueryEngine:
  
 def run_streamlit_app():
     """Streamlit interface for the RAG Query Engine"""
-    st.title("RAG Query Engine")
+    st.title("Document Search App")
 
     try:
         # Initialize the RAG query engine
@@ -367,7 +368,7 @@ def run_streamlit_app():
             st.subheader("Answer")
             st.write(result['answer'])
             
-            st.subheader(f"Sources ({result['num_sources']} found)")
+            st.subheader("Sources")
             _display_sources_streamlit(result['sources'])
         else:
             st.warning("Please enter a question.")
@@ -377,10 +378,18 @@ def _display_sources_streamlit(sources):
     Display sources in Streamlit UI.
     """
     if sources:
+        seen = set()
         for i, source in enumerate(sources, 1):
-            with st.expander(f"Source {i}: {source['metadata'].get('file_path', 'Unknown')}"):
-                #st.write(f"**File Path:** {source['metadata'].get('file_path', 'N/A')}")
-                st.write(f"**Content:** {source['content']}")
+            file_path = source['metadata'].get('file_path', 'Unknown')
+            if file_path != 'Unknown':
+                filename = file_path.split("/")[-1] if "/" in file_path else file_path
+                if filename not in seen:
+                    seen.add(filename)
+                    encoded_path = urllib.parse.quote(file_path, safe=':/')
+                    # Display filename as link, with file_path as tooltip (mouse over)
+                    st.markdown(f'<a href="{encoded_path}" title="{file_path}">{filename}</a>', unsafe_allow_html=True)
+            else:
+                st.write(f"Source {i}: Unknown")
     else:
         st.write("No sources found.")
 
