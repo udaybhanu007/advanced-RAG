@@ -1,6 +1,7 @@
 import os
 import logging
 import time
+from dotenv import load_dotenv
 from azure.monitor.opentelemetry import configure_azure_monitor
 import streamlit as st
 from typing import List, Optional
@@ -20,7 +21,10 @@ from opencensus.stats import aggregation as aggregation_module
 from opencensus.tags import tag_map as tag_map_module
 from opencensus.ext.azure.metrics_exporter import new_metrics_exporter
 from opencensus.ext.azure.log_exporter import AzureLogHandler
+#from langchain.callbacks.tracers import LangChainTracer
+from langsmith import traceable
 
+#tracer = LangChainTracer(project_name="RAG Retriever")
 class Source(BaseModel):
     """Represents a single source document."""
     content: str = Field(..., description="The content of the source document.")
@@ -36,12 +40,18 @@ class RAGResponse(BaseModel):
 
 class RAGQueryEngine:
     """RAG Query Engine using Qdrant vector store"""
-
+    load_dotenv()
     #region Init & Setup
-    def __init__(self, collection_name: str = "rag_documents",
+    def __init__(self, collection_name: str = "rag_collection",
                  qdrant_host: str = "localhost", qdrant_port: int = 6333):
         self.collection_name = collection_name
-        self.qdrant_client = QdrantClient(host=qdrant_host, port=qdrant_port)
+        qdrant = QdrantClient(
+            url=os.environ.get("qdrant-url"),
+            api_key=os.environ.get("qdrant-api-key")
+        )
+
+        self.qdrant_client = qdrant
+        #self.qdrant_client = QdrantClient(host=qdrant_host, port=qdrant_port)
         self.embeddings = HuggingFaceEmbeddings(
             model_name="sentence-transformers/all-MiniLM-L6-v2",
             model_kwargs={'device': 'cpu'}
@@ -209,6 +219,7 @@ class RAGQueryEngine:
     #endregion
 
     #region Query & Search
+    @traceable
     def search(self, question: str) -> dict:
         """
         Query the RAG (Retrieval-Augmented Generation) system with a given question and return a structured response.
@@ -222,13 +233,13 @@ class RAGQueryEngine:
             self.logger.info(f"Received query: {question}")
 
             # Retrieval
-            start_retrieval = time.time()
+            #start_retrieval = time.time()
             response = self.qa_chain.invoke({"query": question})
-            retrieval_time = (time.time() - start_retrieval) * 1000
-            self._record_metric(self.retrieval_latency, retrieval_time, tag_map)
+            #retrieval_time = (time.time() - start_retrieval) * 1000
+            #self._record_metric(self.retrieval_latency, retrieval_time, tag_map)
 
             source_chunks = response["source_documents"]
-            self._record_metric(self.chunks_retrieved, len(source_chunks), tag_map)
+            #self._record_metric(self.chunks_retrieved, len(source_chunks), tag_map)
             self.logger.info(f"Retrieved {len(source_chunks)} candidate chunks from the Retrieval QA chain.")
 
             # Enrich metadata
@@ -236,7 +247,7 @@ class RAGQueryEngine:
 
             # Rerank
             top_sortedchunks, rerank_time = self._rerank_chunks(question, source_chunks)
-            self._record_metric(self.rerank_latency, rerank_time, tag_map)
+            #self._record_metric(self.rerank_latency, rerank_time, tag_map)
 
             # LLM answer
             start_llm = time.time()
@@ -244,10 +255,11 @@ class RAGQueryEngine:
                 "input_documents": top_sortedchunks,
                 "question": question
             })
-            llm_time = (time.time() - start_llm) * 1000
-            self._record_metric(self.llm_latency, llm_time, tag_map)
-            self._record_metric(self.token_usage, len(question.split()) + len(answer.split()), tag_map)
-            self._record_metric(self.response_length, len(answer), tag_map)
+
+            # llm_time = (time.time() - start_llm) * 1000
+            # self._record_metric(self.llm_latency, llm_time, tag_map)
+            # self._record_metric(self.token_usage, len(question.split()) + len(answer.split()), tag_map)
+            # self._record_metric(self.response_length, len(answer), tag_map)
 
             sources = [
                 Source(
@@ -276,15 +288,15 @@ class RAGQueryEngine:
             )
             return error_response.model_dump()
 
-    def _record_metric(self, metric, value, tag_map):
-        if self.metrics_enabled and self.stats_recorder and metric:
-            mmap = self.stats_recorder.new_measurement_map()
-            if mmap:
-                if isinstance(value, float):
-                    mmap.measure_float_put(metric, value)
-                else:
-                    mmap.measure_int_put(metric, value)
-                mmap.record(tag_map)
+    # def _record_metric(self, metric, value, tag_map):
+    #     if self.metrics_enabled and self.stats_recorder and metric:
+    #         mmap = self.stats_recorder.new_measurement_map()
+    #         if mmap:
+    #             if isinstance(value, float):
+    #                 mmap.measure_float_put(metric, value)
+    #             else:
+    #                 mmap.measure_int_put(metric, value)
+    #             mmap.record(tag_map)
 
     def _enrich_source_chunks_metadata(self, source_chunks):
         for doc in source_chunks:
@@ -366,29 +378,29 @@ def _display_sources_streamlit(sources):
     """
     if sources:
         for i, source in enumerate(sources, 1):
-            with st.expander(f"Source {i}: {source['metadata'].get('source', 'Unknown')}"):
-                st.write(f"**File Path:** {source['metadata'].get('file_path', 'N/A')}")
+            with st.expander(f"Source {i}: {source['metadata'].get('file_path', 'Unknown')}"):
+                #st.write(f"**File Path:** {source['metadata'].get('file_path', 'N/A')}")
                 st.write(f"**Content:** {source['content']}")
     else:
         st.write("No sources found.")
 
 if __name__ == "__main__":
-    run_streamlit_app()
-    # try:
-    #     rag_engine = RAGQueryEngine(collection_name="doc_chunk_embeddings")
-    #     if rag_engine.verify_connection():
-    #         question = "What are the main security risks in AI?"
-    #         print(f"Querying with: '{question}'")
-    #         result = rag_engine.search(question)
-    #         print("\nAnswer:")
-    #         print(result['answer'])
-    #         print(f"\nSources ({result['num_sources']} found):")
-    #         if result['sources']:
-    #             for i, source in enumerate(result['sources'], 1):
-    #                 print(f"  Source {i}:")
-    #                 print(f"    File Path: {source['metadata'].get('file_path', 'N/A')}")
-    #                 print(f"    Content: {source['content']}")
-    #         else:
-    #             print("No sources found.")
-    # except Exception as e:
-    #     print(f"An error occurred: {e}")
+     run_streamlit_app()
+#     try:
+#         rag_engine = RAGQueryEngine(collection_name="rag_collection")
+#         if rag_engine.verify_connection():
+#             question = "what is Optimized policy compilation for faster decisions?"
+#             print(f"Querying with: '{question}'")
+#             result = rag_engine.search(question)
+#             print("\nAnswer:")
+#             print(result['answer'])
+#             print(f"\nSources ({result['num_sources']} found):")
+#             if result['sources']:
+#                 for i, source in enumerate(result['sources'], 1):
+#                     print(f"  Source {i}:")
+#                     print(f"    File Path: {source['metadata'].get('file_path', 'N/A')}")
+#                     print(f"    Content: {source['content']}")
+#             else:
+#                 print("No sources found.")
+#     except Exception as e:
+#         print(f"An error occurred: {e}")

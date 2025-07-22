@@ -28,3 +28,4 @@ rank_bm25
 tavily-python
 langgraph
 langchain-core
+langsmith
