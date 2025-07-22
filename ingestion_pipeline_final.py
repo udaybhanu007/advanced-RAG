@@ -36,10 +36,17 @@ MIN_WORD_COUNT = 40
 # Initialize services
 nlp = spacy.load("en_core_web_sm")
 embedder = SentenceTransformer("all-MiniLM-L6-v2")
-qdrant = QdrantClient(
-    url=os.environ.get("qdrant-url"),
-    api_key=os.environ.get("qdrant-api-key")
-)
+
+# Initialize Qdrant client with error handling
+try:
+    qdrant = QdrantClient(
+        url=os.environ.get("QDRANT_URL"),
+        api_key=os.environ.get("QDRANT_API_KEY")
+    )
+    print("✅ Qdrant client initialized")
+except Exception as e:
+    print(f"⚠️ Qdrant client init failed: {e}")
+    qdrant = None
 
 # Initialize Azure Blob Storage client
 try:
@@ -50,8 +57,6 @@ except Exception as e:
     print(f"⚠️ Azure Blob Storage init failed: {e}")
     blob_service_client = None
     container_client = None
-
-print(qdrant.get_collections())
 
 try:
     safety_client = ContentSafetyClient(endpoint=AZURE_ENDPOINT, credential=AzureKeyCredential(AZURE_KEY))
@@ -512,11 +517,36 @@ def build_chunks(sections: List[Dict]) -> List[Dict]:
     return all_chunks
 
 # ---------- QDRANT INGEST ----------
+
+def test_qdrant_connection():
+    """Test Qdrant connection and return status"""
+    if not qdrant:
+        print("❌ Qdrant client not initialized")
+        return False
+    
+    try:
+        collections = qdrant.get_collections()
+        print(f"✅ Qdrant connection successful. Found {len(collections.collections)} collections")
+        return True
+    except Exception as e:
+        print(f"❌ Qdrant connection failed: {e}")
+        return False
+
 @traceable
 def ingest_chunks_to_qdrant(chunks: List[Dict]):
     if not chunks:
         print("⚠️ No chunks to embed.")
         return
+    
+    if not qdrant:
+        print("❌ Qdrant client not available. Cannot ingest chunks.")
+        return
+    
+    # Test connection first
+    if not test_qdrant_connection():
+        print("❌ Cannot connect to Qdrant. Aborting ingestion.")
+        return
+    
     texts = [c["content"] for c in chunks]
     print("🧬 Generating embeddings...")
     vectors = embedder.encode(texts, batch_size=32, show_progress_bar=True)
@@ -534,15 +564,6 @@ def ingest_chunks_to_qdrant(chunks: List[Dict]):
         payload=chunks
     )
     print(f"✅ Uploaded {len(chunks)} vectors to Qdrant.")
-
-def save_chunks_for_analysis(chunks: List[Dict], filename: str = "processed_chunks.json"):
-    """Save chunks to file for analysis (optional debugging)"""
-    try:
-        with open(filename, 'w', encoding='utf-8') as f:
-            json.dump(chunks[:50], f, indent=2, ensure_ascii=False)  # Save first 50 chunks
-        print(f"💾 Saved sample chunks to {filename} for analysis")
-    except Exception as e:
-        print(f"⚠️ Failed to save chunks: {e}")
 
 # ---------- MAIN ----------
 
@@ -587,9 +608,8 @@ def main():
     safe_chunks = [c for c in tqdm(chunks, desc="🔍 Azure Safety") if is_chunk_safe(c["content"])]
     print(f"✅ Total safe chunks: {len(safe_chunks)}")
 
-    # Save sample chunks for analysis
+    # Directly ingest to Qdrant
     if safe_chunks:
-        save_chunks_for_analysis(safe_chunks)
         ingest_chunks_to_qdrant(safe_chunks)
     else:
         print("⚠️ No safe chunks to ingest!")
