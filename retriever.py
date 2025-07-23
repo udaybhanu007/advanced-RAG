@@ -246,30 +246,82 @@ def run_streamlit_app():
         """
         <style>
         body {
-            background-color: #e6f2ff;
+            background: #f4f6fb !important;
+            font-family: 'Segoe UI', 'Roboto', 'Arial', sans-serif;
         }
         .stApp {
-            background-color: #e6f2ff;
+            background: #f4f6fb !important;
         }
-        /* Hide Streamlit default header */
         header[data-testid="stHeader"] {
             display: none;
         }
-        /* Remove space above main content */
         .block-container {
             margin-top: 0px !important;
             padding-top: 0px !important;
+            max-width: 600px;
+        }
+        .main-card {
+            background: #fff;
+            border-radius: 18px;
+            box-shadow: 0 4px 24px rgba(0,0,0,0.08);
+            padding: 32px 32px 24px 32px;
+            margin-top: 32px;
+        }
+        .title {
+            font-size: 2.2rem;
+            font-weight: 700;
+            color: #1a237e;
+            margin-bottom: 8px;
+            text-align: center;
+        }
+        .subtitle {
+            font-size: 1.1rem;
+            color: #455a64;
+            margin-bottom: 24px;
+            text-align: center;
+        }
+        .stTextInput>div>input {
+            border-radius: 8px;
+            border: 1px solid #90caf9;
+            padding: 10px;
+            font-size: 1rem;
+        }
+        .stForm .stButton>button {
+            background: linear-gradient(90deg,#1976d2 0,#64b5f6 100%);
+            color: #fff;
+            border-radius: 8px;
+            font-weight: 600;
+            font-size: 1rem;
+            padding: 10px 24px;
+            border: none;
+            box-shadow: 0 2px 8px rgba(25,118,210,0.08);
+        }
+        .sources-card {
+            background: #f8fbff;
+            border-radius: 12px;
+            padding: 16px;
+            margin-top: 16px;
+            box-shadow: 0 2px 8px rgba(25,118,210,0.05);
+        }
+        .source-link {
+            color: #1976d2;
+            font-weight: 500;
+            text-decoration: none;
+            margin-right: 12px;
+        }
+        .source-link:hover {
+            text-decoration: underline;
         }
         </style>
         """,
         unsafe_allow_html=True
     )
 
-    st.title("🔎 Document Search App")
     st.markdown(
         """
-        <div style="padding:10px; background-color:#f8fbff; border-radius:8px; margin-bottom:20px;">
-            <b>Ask a question about your documents and get relevant answers with sources.</b>
+        <div class="main-card">
+            <div class="title">🔎 Document Search App</div>
+            <div class="subtitle">Ask a question about your documents and get relevant answers with sources.</div>
         </div>
         """,
         unsafe_allow_html=True
@@ -297,19 +349,32 @@ def run_streamlit_app():
         if question:
             with st.spinner("Retrieving relevant documents and generating answer..."):
                 result = rag_engine.search(question)
-            st.subheader("Answer")
-            st.write(result['answer'])
-            st.subheader("Sources")
-            _display_sources_streamlit(result['sources'])
+            # Render answer and sources in one block
+            # Build sources HTML as a string
+            sources_html = ""
+            if result['answer'].strip().lower() != "i don't know":
+                sources_html += '<div class="title" style="font-size:1.2rem; margin-bottom:8px; text-align:left;">Sources</div><div class="sources-card">'
+                sources_html += _get_sources_html(result['sources'])
+                sources_html += '</div>'
+            st.markdown(
+                f'<div class="main-card">'
+                f'<div class="title" style="text-align:left;">Answer</div>'
+                f'<div style="font-size:1.05rem; color:#222; margin-bottom:18px; text-align:left;">{result["answer"]}</div>'
+                f'{sources_html}'
+                f'</div>',
+                unsafe_allow_html=True
+            )
         else:
             st.warning("Please enter a question.")
 
-def _display_sources_streamlit(sources):
+
+def _get_sources_html(sources):
     """
-    Display unique filenames and URLs in Streamlit UI.
+    Return HTML string for unique filenames and URLs for sources.
     """
     if sources:
         seen = set()
+        items = []
         for source in sources:
             file_path = source['metadata'].get('file_path', 'Unknown')
             if file_path != 'Unknown':
@@ -317,9 +382,13 @@ def _display_sources_streamlit(sources):
                 url = urllib.parse.quote(file_path, safe=':/')
                 if (filename, url) not in seen:
                     seen.add((filename, url))
-                    st.markdown(f'<a href="{url}" title="{file_path}">{filename}</a>', unsafe_allow_html=True)
+                    items.append(f'<li><a class="source-link" href="{url}" title="{file_path}" target="_blank">{filename}</a></li>')
+        if items:
+            return f'<ul style="padding-left:18px; margin:0;">{"".join(items)}</ul>'
+        else:
+            return "<span style='color:#888;'>No sources found.</span>"
     else:
-        st.write("No sources found.")
+        return "<span style='color:#888;'>No sources found.</span>"
 
 if __name__ == "__main__":
      run_streamlit_app()
