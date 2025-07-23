@@ -2,7 +2,6 @@ import os
 import logging
 import time
 from dotenv import load_dotenv
-from azure.monitor.opentelemetry import configure_azure_monitor
 import streamlit as st
 from typing import List, Optional
 from pydantic import BaseModel, Field
@@ -14,14 +13,6 @@ from langchain.chains import RetrievalQA
 from langchain_core.documents import Document
 from langchain.retrievers import BM25Retriever, EnsembleRetriever
 from sentence_transformers.cross_encoder import CrossEncoder
-from opencensus.stats import stats as stats_module
-from opencensus.stats import measure as measure_module
-from opencensus.stats import view as view_module
-from opencensus.stats import aggregation as aggregation_module
-from opencensus.tags import tag_map as tag_map_module
-from opencensus.ext.azure.metrics_exporter import new_metrics_exporter
-from opencensus.ext.azure.log_exporter import AzureLogHandler
-#from langchain.callbacks.tracers import LangChainTracer
 from langsmith import traceable
 import urllib.parse
 
@@ -64,81 +55,8 @@ class RAGQueryEngine:
         # Setup logging and metrics
         self.logger = logging.getLogger("RAGMetricsLogger")
         self.logger.setLevel(logging.INFO)
-        self.metrics_enabled = False
-        self._setup_opencensus_logging_and_metrics()
+        self.metrics_enabled = False        
         self._setup_retrieval_chain()
-
-    def _setup_opencensus_logging_and_metrics(self):
-        """
-        Setup OpenCensus logging and metrics exporters.
-        """
-        azure_key = os.environ.get("AZURE_LOG_INSTRUMENTATION_KEY")
-        self.stats = None
-        self.view_manager = None
-        self.stats_recorder = None
-        self.exporter = None
-        if azure_key:
-            try:
-                self._add_azure_log_handler(azure_key)
-                self._init_opencensus_stats_exporter(azure_key)
-                self._register_metrics()
-                self.metrics_enabled = True
-            except Exception as e:
-                self.logger.warning(
-                    f"Azure metrics setup failed: {e}"
-                )
-                self.metrics_enabled = False
-                self.stats = None
-                self.view_manager = None
-                self.stats_recorder = None
-                self.exporter = None
-        else:
-            self.logger.addHandler(logging.StreamHandler())
-            self.stats = None
-            self.view_manager = None
-            self.stats_recorder = None
-            self.exporter = None
-
-    def _add_azure_log_handler(self, azure_key):
-        """
-        Add AzureLogHandler to logger.
-        """
-        handler = AzureLogHandler(connection_string=azure_key)
-        self.logger.addHandler(handler)
-
-    def _init_opencensus_stats_exporter(self, azure_key):
-        """
-        Initialize OpenCensus stats, view manager, stats recorder, and exporter.
-        """
-        self.stats = stats_module.stats
-        self.view_manager = self.stats.view_manager
-        self.stats_recorder = self.stats.stats_recorder
-        self.exporter = new_metrics_exporter(
-            connection_string=f"{azure_key}"
-        )
-        self.view_manager.register_exporter(self.exporter)
-
-    def _register_metrics(self):
-        # Define measures
-        self.retrieval_latency = measure_module.MeasureFloat("retrieval_latency", "Time to fetch chunks", "ms")
-        self.chunks_retrieved = measure_module.MeasureInt("chunks_retrieved", "Chunks retrieved per query", "count")
-        self.rerank_latency = measure_module.MeasureFloat("rerank_latency", "Re-ranking latency", "ms")
-        self.llm_latency = measure_module.MeasureFloat("llm_latency", "LLM response latency", "ms")
-        self.token_usage = measure_module.MeasureInt("token_usage", "Token usage per query", "tokens")
-        self.response_length = measure_module.MeasureInt("response_length", "Response length", "tokens")
-
-        # Register views
-        views = [
-            view_module.View("retrieval_latency_view", "Retrieval latency", [], self.retrieval_latency, aggregation_module.LastValueAggregation()),
-            view_module.View("chunks_retrieved_view", "Chunks retrieved", [], self.chunks_retrieved, aggregation_module.SumAggregation()),
-            view_module.View("rerank_latency_view", "Re-ranking latency", [], self.rerank_latency, aggregation_module.LastValueAggregation()),
-            view_module.View("llm_latency_view", "LLM latency", [], self.llm_latency, aggregation_module.LastValueAggregation()),
-            view_module.View("token_usage_view", "Token usage", [], self.token_usage, aggregation_module.SumAggregation()),
-            view_module.View("response_length_view", "Response length", [], self.response_length, aggregation_module.LastValueAggregation()),
-        ]
-        if self.view_manager is not None:
-            for v in views:
-                self.view_manager.register_view(v)
 
     def _setup_retrieval_chain(self):
         """
@@ -229,38 +147,27 @@ class RAGQueryEngine:
             raise ValueError("QA chain not initialized")
 
         try:
-            tag_map = tag_map_module.TagMap()
+            
             self.metrics_enabled = True
             self.logger.info(f"Received query: {question}")
 
             # Retrieval
-            #start_retrieval = time.time()
-            response = self.qa_chain.invoke({"query": question})
-            #retrieval_time = (time.time() - start_retrieval) * 1000
-            #self._record_metric(self.retrieval_latency, retrieval_time, tag_map)
-
+            response = self.qa_chain.invoke({"query": question})           
             source_chunks = response["source_documents"]
-            #self._record_metric(self.chunks_retrieved, len(source_chunks), tag_map)
             self.logger.info(f"Retrieved {len(source_chunks)} candidate chunks from the Retrieval QA chain.")
 
             # Enrich metadata
             self._enrich_source_chunks_metadata(source_chunks)
-
+            
             # Rerank
             top_sortedchunks, rerank_time = self._rerank_chunks(question, source_chunks)
-            #self._record_metric(self.rerank_latency, rerank_time, tag_map)
-
+            
             # LLM answer
             start_llm = time.time()
             answer = self.qa_chain.combine_documents_chain.run({
                 "input_documents": top_sortedchunks,
                 "question": question
             })
-
-            # llm_time = (time.time() - start_llm) * 1000
-            # self._record_metric(self.llm_latency, llm_time, tag_map)
-            # self._record_metric(self.token_usage, len(question.split()) + len(answer.split()), tag_map)
-            # self._record_metric(self.response_length, len(answer), tag_map)
 
             sources = [
                 Source(
@@ -288,16 +195,6 @@ class RAGQueryEngine:
                 num_sources=0
             )
             return error_response.model_dump()
-
-    # def _record_metric(self, metric, value, tag_map):
-    #     if self.metrics_enabled and self.stats_recorder and metric:
-    #         mmap = self.stats_recorder.new_measurement_map()
-    #         if mmap:
-    #             if isinstance(value, float):
-    #                 mmap.measure_float_put(metric, value)
-    #             else:
-    #                 mmap.measure_int_put(metric, value)
-    #             mmap.record(tag_map)
 
     def _enrich_source_chunks_metadata(self, source_chunks):
         for doc in source_chunks:
@@ -343,10 +240,33 @@ class RAGQueryEngine:
  
 def run_streamlit_app():
     """Streamlit interface for the RAG Query Engine"""
-    st.title("Document Search App")
+    # Set page config and background color
+    st.set_page_config(page_title="Document Search App", layout="centered")
+    st.markdown(
+        """
+        <style>
+        body {
+            background-color: #e6f2ff;
+        }
+        .stApp {
+            background-color: #e6f2ff;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True
+    )
+
+    st.title("🔎 Document Search App")
+    st.markdown(
+        """
+        <div style="padding:10px; background-color:#f8fbff; border-radius:8px; margin-bottom:20px;">
+            <b>Ask a question about your documents and get relevant answers with sources.</b>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
 
     try:
-        # Initialize the RAG query engine
         rag_engine = RAGQueryEngine(collection_name="rag_collection")
     except Exception as e:
         st.error(f"Failed to initialize RAG engine: {e}")
@@ -357,17 +277,17 @@ def run_streamlit_app():
         st.error("Failed to connect to Qdrant. Please check your setup.")
         return
 
-    # Get user input
-    question = st.text_input("Enter your question:")
+    # Use a form to group input and button, reducing reruns and UI lag
+    with st.form("query_form"):
+        question = st.text_input("Enter your question:", help="Type your question and click 'Get Answer'")
+        submit = st.form_submit_button("Get Answer")
 
-    if st.button("Get Answer"):
+    if submit:
         if question:
             with st.spinner("Searching for answer..."):
                 result = rag_engine.search(question)
-            
             st.subheader("Answer")
             st.write(result['answer'])
-            
             st.subheader("Sources")
             _display_sources_streamlit(result['sources'])
         else:
@@ -392,24 +312,3 @@ def _display_sources_streamlit(sources):
 
 if __name__ == "__main__":
      run_streamlit_app()
-#     try:
-#         rag_engine = RAGQueryEngine(collection_name="rag_collection")
-#         if rag_engine.verify_connection():
-#             question = "what is Optimized policy compilation for faster decisions?"
-#             print(f"Querying with: '{question}'")
-#             result = rag_engine.search(question)
-#             print("\nAnswer:")
-#             print(result['answer'])
-#             print(f"\nSources ({result['num_sources']} found):")
-#             if result['sources']:
-#                 for i, source in enumerate(result['sources'], 1):
-#                     print(f"  Source {i}:")
-#                     print(f"    File Path: {source['metadata'].get('file_path', 'N/A')}")
-#                     print(f"    Content: {source['content']}")
-#             else:
-#                 print("No sources found.")
-#     except Exception as e:
-#         print(f"An error occurred: {e}")
-#                 print("No sources found.")
-#     except Exception as e:
-#         print(f"An error occurred: {e}")
