@@ -251,6 +251,15 @@ def run_streamlit_app():
         .stApp {
             background-color: #e6f2ff;
         }
+        /* Hide Streamlit default header */
+        header[data-testid="stHeader"] {
+            display: none;
+        }
+        /* Remove space above main content */
+        .block-container {
+            margin-top: 0px !important;
+            padding-top: 0px !important;
+        }
         </style>
         """,
         unsafe_allow_html=True
@@ -266,16 +275,18 @@ def run_streamlit_app():
         unsafe_allow_html=True
     )
 
-    try:
-        rag_engine = RAGQueryEngine(collection_name="rag_collection")
-    except Exception as e:
-        st.error(f"Failed to initialize RAG engine: {e}")
-        return
+    # Show loader while initializing engine and verifying connection
+    with st.spinner("Verifying connection..."):
+        try:
+            rag_engine = RAGQueryEngine(collection_name="rag_collection")
+        except Exception as e:
+            st.error(f"Failed to initialize RAG engine: {e}")
+            return
 
-    # Verify connection to Qdrant
-    if not rag_engine.verify_connection():
-        st.error("Failed to connect to Qdrant. Please check your setup.")
-        return
+        # Verify connection to Qdrant
+        if not rag_engine.verify_connection():
+            st.error("Failed to connect to Qdrant. Please check your setup.")
+            return
 
     # Use a form to group input and button, reducing reruns and UI lag
     with st.form("query_form"):
@@ -284,7 +295,7 @@ def run_streamlit_app():
 
     if submit:
         if question:
-            with st.spinner("Searching for answer..."):
+            with st.spinner("Retrieving relevant documents and generating answer..."):
                 result = rag_engine.search(question)
             st.subheader("Answer")
             st.write(result['answer'])
@@ -312,3 +323,6 @@ def _display_sources_streamlit(sources):
 
 if __name__ == "__main__":
      run_streamlit_app()
+
+
+
