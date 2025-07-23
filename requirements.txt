@@ -15,7 +15,6 @@ langchain-community
 langchain-openai
 pydantic
 streamlit
-azure-monitor-opentelemetry
 rank_bm25
 tavily-python
 langgraph
@@ -45,16 +44,7 @@ BaseModel
 List
 Optional
 AnalyzeTextOptions
-AzureKeyCredential
 BlobServiceClient
 ContentSafetyClient
 AnalyzeTextOptions
-AzureKeyCredential
-AzureLogHandler
-new_metrics_exporter
-tag_map_module
-aggregation_module
-view_module
-measure_module
-stats_module
 CrossEncoder
